@@ -1,0 +1,28 @@
+{
+  "name": "chrome-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Chrome browser automation via Playwright CDP",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "chrome-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
