@@ -291,8 +291,8 @@ SCAN_JS = r"""
   const cl=[]; let cur=[m[0]];
   for(let i=1;i<m.length;i++){if(m[i]-m[i-1]>100000){cl.push(cur);cur=[m[i]];}else cur.push(m[i]);}
   cl.push(cur);
-  const tgt=cl.filter(c=>c.length>=4&&c.length<=8);
-  if(!tgt.length) return JSON.stringify({error:'no 4-8 cluster', sizes: cl.map(c=>c.length)});
+  const tgt=cl.filter(c=>c.length>=1&&c.length<=16);  // 1 = early tobi, up to a full south game
+  if(!tgt.length) return JSON.stringify({error:'no round records in heap', sizes: cl.map(c=>c.length)});
   // stash every 4-8 cluster: records(+40k) and the head region just before it.
   // The heap holds stale games too; picking the actively-viewed one is done in Python.
   const out=[];
@@ -348,10 +348,13 @@ async def main():
         if sig is None: continue
         groups.setdefault(sig, []).append((c, recs))
     if not groups: sys.exit("No decodable game in heap")
-    # winner: most copies, then freshest start address
-    best_sig=max(groups, key=lambda s:(len(groups[s]), max(c['start'] for c,_ in groups[s])))
+    def has_final(recs):
+        return any(x['t'] in ('.lq.RecordHule','.lq.RecordNoTile') and DEC[x['t']](x['p'])['new'] for x in recs)
+    # winner: a FINISHED game beats an unfinished/noise fragment; then most copies, then freshest
+    best_sig=max(groups, key=lambda s:(any(has_final(r) for _,r in groups[s]),
+                                       len(groups[s]), max(c['start'] for c,_ in groups[s])))
     members=sorted(groups[best_sig], key=lambda cr: cr[0]['start'])
-    chosen, recs = members[-1]           # freshest copy = most complete records
+    chosen, recs = next(((c,r) for c,r in reversed(members) if has_final(r)), members[-1])
     # The head sits before only SOME copies; use whichever parses with our account.
     head=None
     for c,_ in reversed(members):
@@ -369,6 +372,9 @@ async def main():
         if x['t'] in ('.lq.RecordHule','.lq.RecordNoTile'):
             r=DEC[x['t']](x['p'])
             if r['new']: finals=r['new']
+    if finals is None:
+        sys.exit("This game hasn't reached its end in the replay yet — the final scores\n"
+                 "aren't in the heap. Play/scrub the replay to the last round, then re-run.")
 
     # seat + names
     names=["Player0","Player1","Player2","Player3"]; self_seat=None; uuid=None; start=None
