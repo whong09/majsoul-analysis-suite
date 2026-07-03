@@ -210,6 +210,8 @@ The game record is a sequence of protobuf `Any` messages:
   - 4: seat
   - 5: zimo (bool)
   - 6: qinjia (bool -- dealer won this hand, NOT from_seat)
+  - 8: dora indicators (repeated tile string — the FULL list at win time, so it includes kan-dora; use this to populate tenhou6 slot [1] rather than only the opening `RecordNewRound` field-16 indicator)
+  - 9: uradora indicators (repeated tile string — present only on riichi wins; populates tenhou6 slot [2])
   - 15: total points
 - 2: old_scores (packed varint)
 - 3: delta_scores (packed varint, **signed 64-bit** two's complement, NOT zigzag)
@@ -230,6 +232,7 @@ Standard 2-character format: `[0-9][mpsz]`
 - **Multiple RecordNewRound clusters**: The heap may contain multiple cached games. Use the cluster with the expected number of rounds and verify starting scores.
 - **Heap mutated between calls**: Always scan AND extract in a single atomic evaluate call.
 - **Final round looks unfinished (no Hule/NoTile after the last RecordNewRound)**: The tail slice past the last round-start is too short and truncated the final round's win record. Increase the `+ 40000` end offset. This is NOT a client/loading issue — the data is already in the heap.
+- **"No contiguous finished game" / fragmented heap**: Sometimes the client keeps the replay records as *scattered individual allocations* spread across the whole heap instead of one contiguous `RecordNewRound → discards → Hule` stream. The primary scan then finds lone `RecordNewRound` markers with no adjacent actions and can't reconstruct the game. `majsoul_extract.py` falls back to a whole-heap scan that gathers the scattered round-ending records (`Hule`/`NoTile`) and chains them by score (`new` of round *k* == `old` of round *k+1*) to recover final scores + placement — but turn-by-turn order can't be reliably rebuilt, so **no analyzable log is written** in this mode. Fix: **reload the replay from your replay list and let it play/skip through to the end once**, then re-run — that rebuilds the contiguous buffer.
 - **Black screen after reload**: Clear IndexedDB (`UnityCache`, `/idbfs`) then reload.
 - **base64 decode fails**: macOS `base64` requires `-d -i <file> -o <file>` syntax (not piped).
 

@@ -147,10 +147,10 @@ def d_angang(p):
     return r
 
 def d_hule(p):
-    r={'hules':[],'delta':[],'new':[]}
+    r={'hules':[],'delta':[],'new':[],'doras':[],'uradora':[]}
     for fn,ty,v in proto(p):
         if fn==1 and ty=='b':
-            h={'seat':0,'hand':[],'melds':[],'hu':'','zimo':False,'pts':0}
+            h={'seat':0,'hand':[],'melds':[],'hu':'','zimo':False,'pts':0,'doras':[],'uradora':[]}
             for a,b,c in proto(v):
                 if a==1 and b=='b':
                     try: h['hand'].append(c.decode('ascii'))
@@ -163,10 +163,19 @@ def d_hule(p):
                     except: pass
                 elif a==4 and b=='v': h['seat']=c
                 elif a==5 and b=='v': h['zimo']=bool(c)
+                elif a==8 and b=='b':   # dora indicators (incl. kan-dora), repeated
+                    try: h['doras'].append(c.decode('ascii'))
+                    except: pass
+                elif a==9 and b=='b':   # uradora indicators (revealed to riichi winners), repeated
+                    try: h['uradora'].append(c.decode('ascii'))
+                    except: pass
                 elif a==15 and b=='v': h['pts']=c
             r['hules'].append(h)
         elif fn==3 and ty=='b': r['delta']=[svar(x) for x in pv(v)]
         elif fn==5 and ty=='b': r['new']=[svar(x) for x in pv(v)]
+    # dora/uradora indicators are shared across double-ron winners; take first non-empty
+    r['doras']=next((h['doras'] for h in r['hules'] if h['doras']), [])
+    r['uradora']=next((h['uradora'] for h in r['hules'] if h['uradora']), [])
     return r
 
 def d_notile(p):
@@ -191,12 +200,15 @@ def infer_from(win, delta):
 def to_tenhou6(recs, names):
     t={"title":["Mahjong Soul"],"name":names,"rule":{"disp":"East","aka":1},"log":[]}
     cur=None; draws=[[],[],[],[]]; disc=[[],[],[],[]]
-    def flush(res=None):
+    def flush(res=None, doras=None, uradora=None):
         nonlocal cur,draws,disc
         if cur is None: return
         s100=[s//100 for s in cur['scores']]
         ri=[cur['chang']*4+cur['ju'],cur['ben'],cur['liqibang']]+s100
-        e=[ri,[cur['dora']] if cur['dora'] else [],[]]
+        # dora indicators: prefer the full list from the win record (includes kan-dora);
+        # fall back to the round-start opening indicator otherwise.
+        dlist = doras if doras else ([cur['dora']] if cur['dora'] else [])
+        e=[ri, dlist, uradora or []]
         for s in range(4): e+= [cur['tiles'][s],draws[s],disc[s]]
         if res: e.append(res)
         t['log'].append(e); cur=None; draws=[[],[],[],[]]; disc=[[],[],[],[]]
@@ -222,7 +234,7 @@ def to_tenhou6(recs, names):
             for h in r['hules']:
                 fw=h['seat'] if h['zimo'] else infer_from(h['seat'],r['delta'])
                 al.append({'who':h['seat'],'fromWho':fw,'hand':h['hand'],'melds':h['melds'],'machi':h['hu'],'tsumo':h['zimo'],'points':h['pts']})
-            flush({'agari':al,'owari':r['delta'],'sc':r['new']})
+            flush({'agari':al,'owari':r['delta'],'sc':r['new']}, r['doras'], r['uradora'])
         elif m['t']=='.lq.RecordNoTile':
             flush({'owari':r['delta'],'sc':r['new']})
     flush()
@@ -318,6 +330,83 @@ async def get_var(ws, name, idn):
     m=await evaluate(ws, f"window.{name}", idn)
     return m['result']['result']['value']
 
+# ---- fragmented-heap fallback ------------------------------------------------
+# When the client keeps replay records as scattered individual allocations rather
+# than one contiguous RecordGame stream (seen after some load paths / client
+# builds), the primary cluster scan finds RecordNewRound markers with no adjacent
+# actions and reports "no ending". We can't reliably re-thread turn order from
+# scattered allocations, but the round-ending records (Hule/NoTile) each carry
+# old/delta/new score vectors, so we CAN chain them to recover final scores and
+# placement. This scan grabs every Hule/NoTile payload plus a few head windows.
+SCAN_ALL_JS = r"""
+(() => {
+  const heap = unityInstance.Module.HEAPU8, N = heap.length;
+  const match=(i,s)=>{for(let k=0;k<s.length;k++){if(heap[i+k]!==s.charCodeAt(k))return false;}return true;};
+  const b64=(a)=>{let b='';for(let i=0;i<a.length;i++)b+=String.fromCharCode(a[i]);return btoa(b);};
+  const endings=[]; const heads=[];
+  for(let i=1;i<N-40;i++){
+    if(heap[i-1]!==0x0a) continue;             // field1 (type_url) LEN tag
+    const len=heap[i];
+    if(len<10||len>40) continue;
+    if(!match(i+1,'.lq.Record')) continue;
+    let name=''; for(let k=i+1;k<i+1+len;k++) name+=String.fromCharCode(heap[k]);
+    if(name.indexOf('.',10)!==-1) continue;    // skip descriptor field-name strings
+    if(heap[i+1+len]!==0x12) continue;         // field2 (payload) tag must follow
+    let p=i+2+len, pl=0, sh=0;                 // read payload length varint
+    while(p<N){const bb=heap[p++]; pl|=(bb&0x7f)<<sh; sh+=7; if(!(bb&0x80))break; if(sh>35){pl=0;break;}}
+    if(name==='.lq.RecordHule'||name==='.lq.RecordNoTile'){
+      if(pl>0&&pl<200000&&p+pl<=N&&endings.length<250) endings.push({n:name, p:b64(heap.slice(p,p+pl))});
+    } else if((name==='.lq.RecordGame'||name==='.lq.RecordCollectedData'||name==='.lq.RecordListEntry')&&heads.length<16){
+      heads.push(b64(heap.slice(Math.max(0,i-256), Math.min(i+8192,N))));
+    }
+    if(endings.length>=250&&heads.length>=16) break;
+  }
+  window.__frag={endings,heads};
+  return JSON.stringify({endings:endings.length, heads:heads.length});
+})()
+"""
+
+async def scan_fragmented(url):
+    async with websockets.connect(url, max_size=None, open_timeout=15) as ws:
+        await evaluate(ws, SCAN_ALL_JS, 10)
+        return await get_var(ws, "__frag", 11)
+
+def recover_final_scores(frag):
+    """From scattered round-ending records, dedupe, chain old<-new, and return
+    (final_scores, [candidate finals]). Chain: round k+1's old == round k's new,
+    so a game's terminal round is the one whose `new` is nobody else's `old`."""
+    endings=[]; seen=set()
+    for e in frag['endings']:
+        pay=base64.b64decode(e['p'])
+        d = d_hule(pay) if e['n']=='.lq.RecordHule' else d_notile(pay)
+        if len(d['new'])!=4 or len(d['delta'])!=4: continue
+        key=(tuple(d['new']), tuple(d['delta']))
+        if key in seen: continue
+        seen.add(key)
+        d['old']=tuple(n-dd for n,dd in zip(d['new'],d['delta']))
+        endings.append(d)
+    if not endings: return None, []
+    old_set={e['old'] for e in endings}
+    by_new={tuple(e['new']):e for e in endings}
+    terminals=[e for e in endings if tuple(e['new']) not in old_set] or endings
+    def chain_len(e):
+        n=1; cur=e; guard=set()
+        while cur['old'] in by_new and cur['old'] not in guard:
+            guard.add(cur['old']); cur=by_new[cur['old']]; n+=1
+        return n
+    # longest chain wins (most rounds); prefer a busted game (tobi) then top score
+    terminals.sort(key=lambda e:(chain_len(e), any(s<0 for s in e['new']), max(e['new'])), reverse=True)
+    return terminals[0]['new'], [t['new'] for t in terminals]
+
+def recover_head(frag):
+    for hb in frag['heads']:
+        h=parse_head(base64.b64decode(hb))
+        if h and any(a==MY_ACCOUNT_ID for (a,n) in h['accounts'].values()): return h
+    for hb in frag['heads']:
+        h=parse_head(base64.b64decode(hb))
+        if h and h['accounts']: return h
+    return None
+
 async def main():
     global OUT_DIR
     room = "Silver-Room-East"
@@ -373,8 +462,38 @@ async def main():
             r=DEC[x['t']](x['p'])
             if r['new']: finals=r['new']
     if finals is None:
-        sys.exit("This game hasn't reached its end in the replay yet — the final scores\n"
-                 "aren't in the heap. Play/scrub the replay to the last round, then re-run.")
+        # No contiguous finished game. Either the replay hasn't been played to the
+        # end, or the records are fragmented across the heap (individual allocations
+        # instead of one stream). Try to recover final scores from scattered
+        # round-ending records so the user at least gets the result + placement.
+        print("  no contiguous finished game in heap; trying fragmented-heap recovery...")
+        frag = await scan_fragmented(url)
+        ffinals, cands = recover_final_scores(frag)
+        if ffinals is None:
+            sys.exit("This game hasn't reached its end in the replay yet — the final scores\n"
+                     "aren't in the heap. Play/scrub the replay to the last round, then re-run.")
+        fhead = recover_head(frag) or head
+        fnames=["Player0","Player1","Player2","Player3"]; fseat=None
+        if fhead:
+            for seat,(aid,nick) in fhead['accounts'].items():
+                if 0<=seat<4: fnames[seat]=nick
+                if aid==MY_ACCOUNT_ID: fseat=seat
+        print("\nWARN: the replay records are FRAGMENTED across the heap (not a contiguous\n"
+              "stream), so turn-by-turn play can't be reliably reconstructed and no\n"
+              "analyzable log was written. Recovered the final result only:\n")
+        if fseat is not None:
+            fplace = sorted(range(4), key=lambda s:(-ffinals[s], s)).index(fseat)+1
+            fsuf = {1:'1st',2:'2nd',3:'3rd',4:'4th'}.get(fplace,'?')
+            print(f"  you = seat{fseat} ({fnames[fseat]}) = {ffinals[fseat]} pts = {fsuf} place")
+        else:
+            print("  (couldn't detect your seat — set MJS_ACCOUNT_ID; placement unavailable)")
+        print(f"  final scores: {ffinals}")
+        if len(cands) > 1: print(f"  (other terminal candidates seen: {cands[1:]})")
+        if fhead and fhead.get('uuid'): print(f"  uuid: {fhead['uuid']}")
+        print("\nTo get a full, analyzable log: reload the replay from your replay list and\n"
+              "let it play/skip through to the end once, then re-run — that rebuilds the\n"
+              "contiguous record buffer this extractor needs.")
+        sys.exit(0)
 
     # seat + names
     names=["Player0","Player1","Player2","Player3"]; self_seat=None; uuid=None; start=None

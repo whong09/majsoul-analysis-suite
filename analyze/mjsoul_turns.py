@@ -348,54 +348,286 @@ def build(doc, only_round=None, only_seat=None):
             s = rd["seats"][p]
             seats_out[p] = walk_seat(s["haipai"], s["draws"], s["discards"], dealer == p)
             seats_out[p]["riichi_info"] = s.get("riichi_info")
+        res = rd.get("result")
         out.append(dict(idx=idx, label=f"{wind} {num}" + (f" ({rd['honba']} honba)" if rd["honba"] else ""),
-                        dealer=names[dealer], dora=rd["dora"], kind=rd["kind"],
+                        dealer=names[dealer], dealer_seat=dealer, dora=rd["dora"], kind=rd["kind"],
+                        agari=res.get("agari") if isinstance(res, dict) else None,
+                        reason=rd.get("reason"),
                         scores=dict(zip(names, rd["scores"])) if rd.get("scores") else None,
                         names=names, seats=seats_out))
     return names, out
 
-def render(names, built):
-    L = []
+def _gain_label(acquires):
+    """Short token for what entered the hand this turn: a drawn tile, a call, or a kan."""
+    toks = []
+    for a in acquires:
+        act = a["action"]
+        if "draw" in a:
+            toks.append(a["draw"])
+        elif act.startswith("call "):
+            p = act.split()               # "call chi 4s (+5s6s)" -> "chi4s"
+            toks.append(p[1] + p[2])
+        elif act.startswith("ankan"):
+            toks.append("ankan" + act.split()[1])
+        elif act.startswith("added-kan"):
+            toks.append("kakan" + act.split()[1])
+    return "+".join(toks) if toks else "—"
+
+def _discard_label(rel):
+    t = rel["discard"]
+    kind = rel.get("kind", "")
+    if kind == "RIICHI":
+        return t + " RIICHI!"
+    if kind == "tsumogiri":
+        return t + " *"          # discarded the tile just drawn
+    return t                     # tedashi — an actual choice from hand
+
+def _seat_rows(seat):
+    """Collapse the per-event stream into one row per turn: (turn, gain, discard, hand, state).
+    Events sharing a turn number (draw + optional kan/call + discard/win) are merged."""
+    rows = []
+    evs = seat["events"]
+    prev_tenpai = False
+    i = 0
+    while i < len(evs):
+        t = evs[i]["turn"]
+        group = []
+        while i < len(evs) and evs[i]["turn"] == t:
+            group.append(evs[i]); i += 1
+        rel = group[-1]
+        if "discard" in rel or "win" in rel:
+            gain = _gain_label(group[:-1])
+        else:                            # rare: a turn that never reached a discard
+            gain = _gain_label(group); rel = None
+        if rel is None:
+            rows.append((t, gain, "", group[-1].get("hand", ""), "")); continue
+        if "win" in rel:
+            rows.append((t, rel.get("win", gain), "TSUMO ✓", rel.get("hand", ""), "win"))
+            prev_tenpai = False; continue
+        istenpai = bool(rel.get("tenpai"))
+        first = istenpai and not prev_tenpai
+        prev_tenpai = istenpai
+        if "shanten" not in rel:
+            state = ""
+        elif rel["shanten"] > 0:
+            state = f"{rel['shanten']}-shanten"
+        else:
+            w = "/".join(rel["waits"])
+            state = f"➜ TENPAI  {w}" if first else f"tenpai  {w}"
+        rows.append((t, gain, _discard_label(rel), rel.get("hand", ""), state))
+    return rows
+
+def render_by_seat(names, built):
+    L = ["legend:  * = tsumogiri (discarded the drawn tile)   RIICHI! = riichi declared   "
+         "➜ = reached tenpai"]
     for rd in built:
-        L.append("=" * 78)
-        L.append(f"[idx {rd['idx']}] {rd['label']}   dealer: {rd['dealer']}   "
-                 f"dora ind: {', '.join(rd['dora']) or '—'}")
+        L.append("")
+        L.append("═" * 78)
+        L.append(f" idx {rd['idx']} · {rd['label']} · dealer {rd['dealer']} · "
+                 f"dora {', '.join(rd['dora']) or '—'}")
         for p, seat in rd["seats"].items():
             ri = seat.get("riichi_info") or {}
             rlabel = ""
             if ri.get("established"):
-                rlabel = (f"  [riichi on {ri['tile']} @T{ri['turn']}]" if ri.get("via") == "tedashi"
-                          else f"  [tsumogiri riichi @T≥{ri['turn_min']}]")
+                rlabel = (f" · riichi {ri['tile']} @T{ri['turn']}" if ri.get("via") == "tedashi"
+                          else f" · tsumogiri-riichi @T≥{ri['turn_min']}")
             elif ri.get("declared") and ri.get("via") == "tedashi":
-                rlabel = f"  [riichi on {ri['tile']} NULLIFIED]"
-            L.append(f"\n  --- {names[p]}{' (dealer)' if names[p]==rd['dealer'] else ''}{rlabel} ---")
+                rlabel = f" · riichi {ri['tile']} NULLIFIED"
+            dealer_tag = " · dealer" if names[p] == rd["dealer"] else ""
+            L.append("")
+            L.append(f"  {names[p]}{dealer_tag}{rlabel}")
             if seat["melds"]:
-                L.append(f"      melds: {', '.join(seat['melds'])}")
-            for e in seat["events"]:
-                tag = ""
-                if e.get("tenpai"):
-                    tag = f"   >> TENPAI  wait {'/'.join(e['waits'])}"
-                elif "shanten" in e:
-                    tag = f"   ({e['shanten']}-shanten)"
-                if "win" in e:
-                    tag = "   << WIN"
-                L.append(f"      T{e['turn']:>2} {e['action']:<26} | {e['hand']:<34}{tag}")
+                L.append(f"    melds: {', '.join(seat['melds'])}")
+            L.append(f"    {'T':>3}  {'draw':<8} {'discard':<11} {'hand':<34} state")
+            for (t, gain, disc, hand, state) in _seat_rows(seat):
+                L.append(f"    {t:>3}  {gain:<8} {disc:<11} {hand:<34} {state}".rstrip())
             if seat["warnings"]:
-                L.append(f"      ! warnings: {'; '.join(seat['warnings'])}")
-        L.append("")
+                L.append(f"    ! {'; '.join(seat['warnings'])}")
+    return "\n".join(L)
+
+# --------------------------------------------------------------------------- #
+# interleaved (chronological, all seats) view
+# --------------------------------------------------------------------------- #
+def _seat_actions(seat):
+    """Like _seat_rows, but structured: one dict per turn, carrying the call/kan
+    metadata needed to reconstruct global turn order and dora flips."""
+    acts = []
+    evs = seat["events"]
+    prev_tenpai = False
+    i = 0
+    while i < len(evs):
+        t = evs[i]["turn"]
+        group = []
+        while i < len(evs) and evs[i]["turn"] == t:
+            group.append(evs[i]); i += 1
+        rel = group[-1]
+        has_rel = ("discard" in rel) or ("win" in rel)
+        acq = group[:-1] if has_rel else group
+        call_type = call_tile = None
+        kans = 0
+        toks = []
+        for a in acq:
+            act = a["action"]
+            if "draw" in a:
+                toks.append(a["draw"])
+            elif act.startswith("call "):
+                p = act.split(); call_type = p[1]; call_tile = p[2]
+                toks.append(p[1] + p[2])
+                if call_type == "minkan":
+                    kans += 1
+            elif act.startswith("ankan"):
+                kans += 1; toks.append("ankan" + act.split()[1])
+            elif act.startswith("added-kan"):
+                kans += 1; toks.append("kakan" + act.split()[1])
+        d = dict(turn=t, gain="+".join(toks) if toks else "—",
+                 call_type=call_type, call_tile=call_tile, kans=kans, _from=None)
+        if not has_rel:
+            d.update(is_win=False, discard=None, kind="", hand=group[-1].get("hand", ""), state="")
+            acts.append(d); continue
+        if "win" in rel:
+            d.update(is_win=True, discard=None, kind="", hand=rel.get("hand", ""),
+                     state="win", gain=rel.get("win", d["gain"]))
+            acts.append(d); prev_tenpai = False; continue
+        istenpai = bool(rel.get("tenpai"))
+        first = istenpai and not prev_tenpai
+        prev_tenpai = istenpai
+        if "shanten" not in rel:
+            state = ""
+        elif rel["shanten"] > 0:
+            state = f"{rel['shanten']}-shanten"
+        else:
+            w = "/".join(rel["waits"])
+            state = f"➜ TENPAI  {w}" if first else f"tenpai  {w}"
+        d.update(is_win=False, discard=rel["discard"], kind=rel.get("kind", ""),
+                 hand=rel.get("hand", ""), state=state)
+        acts.append(d)
+    return acts
+
+def _wl(seat, dealer):
+    """This round's seat-wind letter (dealer = East)."""
+    return "ESWN"[(seat - dealer) % 4]
+
+def _interleave(acts_by_seat, dealer, dora):
+    """Walk the four seats in true chronological order, following calls. Yields
+    ('act', step, seat, action) rows interleaved with ('dora', tile) flip rows."""
+    ptr = [0, 0, 0, 0]
+    actor = dealer
+    kan_i = 1                 # dora[0] is the opening indicator; kans reveal 1,2,...
+    step = 0
+    rows = []
+    guard = 0
+    while guard < 600:
+        guard += 1
+        if ptr[actor] >= len(acts_by_seat[actor]):
+            break             # actor is out of actions -> round ended (ron / exhaustive)
+        a = acts_by_seat[actor][ptr[actor]]; ptr[actor] += 1
+        step += 1
+        rows.append(("act", step, actor, a))
+        for _ in range(a["kans"]):
+            rows.append(("dora", dora[kan_i] if kan_i < len(dora) else None))
+            kan_i += 1
+        if a["is_win"]:
+            break
+        if a["discard"] is None:
+            actor = (actor + 1) % 4; continue
+        caller = None
+        for s in range(4):
+            if s == actor or ptr[s] >= len(acts_by_seat[s]):
+                continue
+            nxt = acts_by_seat[s][ptr[s]]
+            if nxt["call_type"] in ("chi", "pon", "minkan") and nxt["call_tile"] \
+               and norm(nxt["call_tile"]) == norm(a["discard"]):
+                caller = s; break
+        if caller is not None:
+            acts_by_seat[caller][ptr[caller]]["_from"] = actor
+            actor = caller
+        else:
+            actor = (actor + 1) % 4
+    return rows
+
+def _disc_disp(a):
+    t = a["discard"]; k = a.get("kind", "")
+    if k == "RIICHI":
+        return t + " RIICHI!"
+    if k == "tsumogiri":
+        return t + " *"
+    return t
+
+def _result_lines(rd, names, dealer):
+    out = ["   " + "·" * 44]
+    kind = rd.get("kind")
+    if kind == "agari" and rd.get("agari"):
+        for a in rd["agari"]:
+            who = f"{_wl(a['who'], dealer)} {names[a['who']]}"
+            pts = a.get("points", "?"); machi = a.get("machi", "?")
+            if a.get("tsumo"):
+                out.append(f"   ▶ {who} TSUMO {pts} (on {machi})")
+            else:
+                frm = f"{_wl(a['fromWho'], dealer)} {names[a['fromWho']]}"
+                out.append(f"   ▶ {who} RON {pts} off {frm} (on {machi})")
+    elif kind == "exhaustive":
+        out.append("   ▶ exhaustive draw (ryuukyoku)")
+    elif kind == "abortive":
+        out.append(f"   ▶ abortive draw — {rd.get('reason') or 'abortive'}")
+    if rd.get("scores"):
+        out.append(f"   scores: {rd['scores']}")
+    return out
+
+def render(names, built):
+    L = ["legend:  * = tsumogiri   RIICHI! = riichi declared   ◂X = called from seat X   "
+         "✦ = new dora (kan)   ➜ = reached tenpai"]
+    for rd in built:
+        dealer = rd["dealer_seat"]
+        L.append(""); L.append("═" * 78)
+        opening = rd["dora"][0] if rd["dora"] else "—"
+        L.append(f" idx {rd['idx']} · {rd['label']} · opening dora {opening}")
+        seats = rd["seats"]
+        legend = []
+        for s in range(4):
+            ri = seats[s].get("riichi_info") or {}
+            r = " {riichi}" if ri.get("established") else ""
+            legend.append(f"{_wl(s, dealer)} {names[s]}{'  ★' if s == dealer else ''}"
+                          + (" [riichi]" if ri.get("established") else ""))
+        L.append("   " + "   ".join(legend))
+        L.append(f"   {'#':>3} w  {'draw':<9} {'discard':<11} {'hand':<34} state")
+        acts_by_seat = [_seat_actions(seats[s]) for s in range(4)]
+        for row in _interleave(acts_by_seat, dealer, rd["dora"]):
+            if row[0] == "dora":
+                tile = row[1]
+                L.append(f"        ✦ new dora indicator → {tile or '(revealed only at win)'}")
+                continue
+            _, step, seat, a = row
+            gain = a["gain"]
+            if a.get("_from") is not None:
+                gain += "◂" + _wl(a["_from"], dealer)
+            if a["is_win"]:
+                disc, state = "TSUMO ✓", "win"
+            else:
+                disc, state = _disc_disp(a), a["state"]
+            L.append(f"   {step:>3} {_wl(seat, dealer)}  {gain:<9} {disc:<11} "
+                     f"{a['hand']:<34} {state}".rstrip())
+        L += _result_lines(rd, names, dealer)
+        for s in range(4):
+            w = seats[s].get("warnings")
+            if w:
+                L.append(f"   ! {_wl(s, dealer)} {names[s]}: {'; '.join(w)}")
     return "\n".join(L)
 
 def main():
     ap = argparse.ArgumentParser(description="Turn-by-turn Mahjong Soul replay parser.")
     ap.add_argument("path")
     ap.add_argument("--round", type=int, default=None, help="0-based log index (see mjsoul_decode)")
-    ap.add_argument("--seat", type=int, default=None, help="seat 0-3 (E/S/W/N at start)")
+    ap.add_argument("--seat", type=int, default=None, help="seat 0-3 (E/S/W/N at start); implies --by-seat")
+    ap.add_argument("--by-seat", action="store_true",
+                    help="group by player instead of the default interleaved timeline")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     doc = load(a.path)
     names, built = build(doc, a.round, a.seat)
     if a.json:
         print(json.dumps({"names": names, "rounds": built}, ensure_ascii=False, indent=2))
+    elif a.by_seat or a.seat is not None:
+        print(render_by_seat(names, built))
     else:
         print(render(names, built))
 
