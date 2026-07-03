@@ -36,7 +36,7 @@ computed from the concealed hand plus called melds; red fives (0m/0p/0s) are tre
 import json, sys, os, argparse, functools
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mjsoul_decode import load, decode, WINDS  # noqa: E402
+from mjsoul_decode import load, decode, WINDS, dtile, dtiles, HONOR_DISP  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # tile <-> 34-index helpers  (red fives 0m/0p/0s normalise to 5 for counting)
@@ -201,28 +201,19 @@ def waits(concealed_counts, melds):
 # --------------------------------------------------------------------------- #
 # hand display
 # --------------------------------------------------------------------------- #
-# honors shown as winds E/S/W/N and dragons White/Green/Red instead of z-notation
-HONOR_DISP = {"1z": "E", "2z": "S", "3z": "W", "4z": "N", "5z": "Wh", "6z": "G", "7z": "R"}
-
-def dtile(t):
-    """Display form of one tile: honors as E/S/W/N/Wh/G/R; red fives kept (0m/0p/0s)."""
-    b = strip_pref(t)
-    return HONOR_DISP.get(b, b)
-
-def _conv_tiles(s):
-    """Convert a concatenation of raw 2-char tile codes (e.g. a meld) to display form."""
-    return "".join(dtile(s[i:i+2]) for i in range(0, len(s), 2))
-
+# honor display (dtile / dtiles / HONOR_DISP) is imported from mjsoul_decode so every
+# tool renders honors the same way.
 def hand_str(tiles):
-    """Group tiles by suit for compact reading; honors shown as ESWN/WhGR, red fives kept."""
+    """Group raw tiles by suit for compact reading, keeping red-five codes. Kept in
+    canonical z-notation so the analysis tools can re-parse it; honor display
+    (ESWN/WhGR) is applied only at render time via dtiles()."""
     order = {"m": 0, "p": 1, "s": 2, "z": 3}
     def key(t):
         n = norm(t)
         return (order[n[1]], int(n[0]), t)
     groups = {"m": [], "p": [], "s": [], "z": []}
     for t in sorted(tiles, key=key):
-        n = norm(t); suit = n[1]
-        groups[suit].append(HONOR_DISP.get(n, strip_pref(t)) if suit == "z" else strip_pref(t))
+        groups[norm(t)[1]].append(strip_pref(t))
     parts = ["".join(groups[s]) for s in "mpsz" if groups[s]]
     return " ".join(parts) if parts else "-"
 
@@ -454,7 +445,7 @@ def render_by_seat(names, built):
                 L.append(f"    melds: {', '.join(_meld_disp(m) for m in seat['melds'])}")
             L.append(f"    {'T':>3}  {'draw':<8} {'discard':<11} {'hand':<34} state")
             for (t, gain, disc, hand, state) in _seat_rows(seat):
-                L.append(f"    {t:>3}  {gain:<8} {disc:<11} {hand:<34} {state}".rstrip())
+                L.append(f"    {t:>3}  {gain:<8} {disc:<11} {dtiles(hand):<34} {state}".rstrip())
             if seat["warnings"]:
                 L.append(f"    ! {'; '.join(seat['warnings'])}")
     return "\n".join(L)
@@ -570,11 +561,8 @@ def _interleave(acts_by_seat, dealer, dora):
     return rows
 
 def _meld_disp(m):
-    """Convert a raw meld label like 'chi:4s0s6s' to display form 'chi:4s0s6s' (honors -> letters)."""
-    if ":" in m:
-        kind, tiles = m.split(":", 1)
-        return f"{kind}:{_conv_tiles(tiles)}"
-    return m
+    """Convert a raw meld label like 'pon:5z5z5z' to display form 'pon:WhWhWh'."""
+    return dtiles(m)
 
 def _disc_disp(a):
     t = dtile(a["discard"]); k = a.get("kind", "")
@@ -640,7 +628,7 @@ def render(names, built):
             else:
                 disc, state = _disc_disp(a), a["state"]
             L.append(f"   {step:>3} {_wl(seat, dealer)}  {gain:<9} {disc:<11} "
-                     f"{a['hand']:<34} {state}".rstrip())
+                     f"{dtiles(a['hand']):<34} {state}".rstrip())
         L += _result_lines(rd, names, dealer)
         for s in range(4):
             w = seats[s].get("warnings")

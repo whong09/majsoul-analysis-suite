@@ -28,6 +28,21 @@ HONOR = {"1z":"East","2z":"South","3z":"West","4z":"North",
          "5z":"White","6z":"Green","7z":"Red"}
 CALL = {"c":"chi","p":"pon","m":"minkan","a":"ankan","k":"added-kan"}
 
+# Display abbreviations for honors in the CLI reports: winds E/S/W/N, dragons Wh/G/R.
+# (The tenhou6 JSON still encodes them as Nz; this is display-only.) Canonical here so
+# every tool — decode, turns, luck — renders honors the same way.
+HONOR_DISP = {"1z":"E","2z":"S","3z":"W","4z":"N","5z":"Wh","6z":"G","7z":"R"}
+
+def dtile(t):
+    """One tile in display form: honors -> E/S/W/N/Wh/G/R; red fives kept (0m/0p/0s).
+    Tolerates discard/call prefixes (r/t/a/k)."""
+    return HONOR_DISP.get(t.lstrip("rtak"), t.lstrip("rtak"))
+
+def dtiles(s):
+    """Convert every 2-char tile code appearing in a string (e.g. a meld like
+    'shunzi(5z,5z,5z)') to display form."""
+    return re.sub(r"[0-9][mpsz]", lambda m: dtile(m.group()), s)
+
 def pretty(t):
     """Human label for a tile code, keeping red-five and prefix info."""
     return t
@@ -184,7 +199,7 @@ def decode(doc):
 
 def fmt_call(c):
     typ = CALL.get(c[0], c[0])
-    tiles = c[1:].split(",")
+    tiles = [dtile(t) for t in c[1:].split(",")]
     return f"{typ}({tiles[0]}←, {' '.join(tiles[1:])})"
 
 def report(doc):
@@ -200,19 +215,19 @@ def report(doc):
         hdr = f"{wind} {num}" + (f" ({rd['honba']} honba)" if rd["honba"] else "")
         out.append(f"=== {hdr} ===  dealer: {names[oya]}"
                    + (f"  |  {rd['sticks']} riichi stick(s) carried" if rd["sticks"] else ""))
-        out.append(f"  dora indicator: {', '.join(rd['dora']) or '—'}")
+        out.append(f"  dora indicator: {', '.join(dtile(x) for x in rd['dora']) or '—'}")
         # riichi declarations (established sticks + nullified declarations)
         ri, nulled = [], []
         for p, s in rd["seats"].items():
             info = s.get("riichi_info", {})
             if info.get("established"):
                 if info.get("via") == "tedashi":
-                    ri.append(f"{names[p]} (on {info['tile']}, turn {info['turn']})")
+                    ri.append(f"{names[p]} (on {dtile(info['tile'])}, turn {info['turn']})")
                 else:
                     ri.append(f"{names[p]} (tsumogiri riichi, declared turn \u2265{info['turn_min']}; "
                               f"exact tile not encoded)")
             elif info.get("declared") and info.get("via") == "tedashi":
-                nulled.append(f"{names[p]} (declared on {info['tile']}, ronned before establishing)")
+                nulled.append(f"{names[p]} (declared on {dtile(info['tile'])}, ronned before establishing)")
         if ri:     out.append("  riichi: " + "; ".join(ri))
         if nulled: out.append("  riichi (nullified): " + "; ".join(nulled))
         # calls
@@ -224,8 +239,8 @@ def report(doc):
             for a in res["agari"]:
                 who = names[a["who"]]
                 how = "tsumo" if a.get("tsumo") else f"ron off {names[a['fromWho']]}"
-                melds = ("  melds: " + ", ".join(a["melds"])) if a.get("melds") else ""
-                out.append(f"  WIN: {who} — {a['points']} pts ({how}), wait {a['machi']}{melds}")
+                melds = ("  melds: " + ", ".join(dtiles(m) for m in a["melds"])) if a.get("melds") else ""
+                out.append(f"  WIN: {who} — {a['points']} pts ({how}), wait {dtile(a['machi'])}{melds}")
             if rd["deltas"]: out.append(f"  deltas: {dict(zip(names, rd['deltas']))}")
             if rd["scores"]: out.append(f"  scores: {dict(zip(names, rd['scores']))}")
         elif rd["kind"] == "exhaustive":

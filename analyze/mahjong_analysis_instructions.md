@@ -60,6 +60,10 @@ timing, deal-in analysis), pull it from the decoded structure.
 - `0m / 0p / 0s` = **red five** of that suit.
 - Honors `Nz`: `1z`=East, `2z`=South, `3z`=West, `4z`=North, `5z`=White,
   `6z`=Green, `7z`=Red.
+- **Display note:** the JSON always encodes honors as `Nz`, but the CLI reports
+  (`mjsoul_decode`, `mjsoul_turns`, `mjsoul_luck`) render them as the abbreviations
+  **E / S / W / N** (winds) and **Wh / G / R** (white / green / red dragons) for
+  readability. The conversion is display-only (`dtile` / `dtiles` in `mjsoul_decode`).
 
 ### 3.2 Discard prefixes (elements 5 / 8 / 11 / 14)
 - `r` → **tsumogiri**: the just-drawn tile was discarded (e.g. `r5z`).

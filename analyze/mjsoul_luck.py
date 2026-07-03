@@ -111,7 +111,7 @@ def analyze(paths):
                         agg[bucket]["draw"] += 1
                     if p == me and waits:
                         unlucky.append((path.split("/")[-1].split("_")[1], f"{wind}{num}",
-                                        "/".join(waits), lw,
+                                        "/".join(M.dtile(w) for w in waits), lw,
                                         "dealt-in" if p in dealin_by else
                                         ("outraced" if winners else "draw")))
     return agg, unlucky
