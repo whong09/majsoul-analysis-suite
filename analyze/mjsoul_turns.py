@@ -201,16 +201,29 @@ def waits(concealed_counts, melds):
 # --------------------------------------------------------------------------- #
 # hand display
 # --------------------------------------------------------------------------- #
+# honors shown as winds E/S/W/N and dragons White/Green/Red instead of z-notation
+HONOR_DISP = {"1z": "E", "2z": "S", "3z": "W", "4z": "N", "5z": "Wh", "6z": "G", "7z": "R"}
+
+def dtile(t):
+    """Display form of one tile: honors as E/S/W/N/Wh/G/R; red fives kept (0m/0p/0s)."""
+    b = strip_pref(t)
+    return HONOR_DISP.get(b, b)
+
+def _conv_tiles(s):
+    """Convert a concatenation of raw 2-char tile codes (e.g. a meld) to display form."""
+    return "".join(dtile(s[i:i+2]) for i in range(0, len(s), 2))
+
 def hand_str(tiles):
-    """Group raw tiles by suit for compact reading, keeping red-five codes."""
+    """Group tiles by suit for compact reading; honors shown as ESWN/WhGR, red fives kept."""
     order = {"m": 0, "p": 1, "s": 2, "z": 3}
     def key(t):
         n = norm(t)
         return (order[n[1]], int(n[0]), t)
     groups = {"m": [], "p": [], "s": [], "z": []}
     for t in sorted(tiles, key=key):
-        groups[norm(t)[1]].append(strip_pref(t))
-    parts = ["".join(groups[s]) for s in "mps z".replace(" ", "") if groups[s]]
+        n = norm(t); suit = n[1]
+        groups[suit].append(HONOR_DISP.get(n, strip_pref(t)) if suit == "z" else strip_pref(t))
+    parts = ["".join(groups[s]) for s in "mpsz" if groups[s]]
     return " ".join(parts) if parts else "-"
 
 # --------------------------------------------------------------------------- #
@@ -358,23 +371,24 @@ def build(doc, only_round=None, only_seat=None):
     return names, out
 
 def _gain_label(acquires):
-    """Short token for what entered the hand this turn: a drawn tile, a call, or a kan."""
+    """Short token for what entered the hand this turn: a drawn tile, a call, or a kan.
+    (In the by-seat view the chi called-tile isn't resolved, so the raw meld order shows.)"""
     toks = []
     for a in acquires:
         act = a["action"]
         if "draw" in a:
-            toks.append(a["draw"])
+            toks.append(dtile(a["draw"]))
         elif act.startswith("call "):
             p = act.split()               # "call chi 4s (+5s6s)" -> "chi4s"
-            toks.append(p[1] + p[2])
+            toks.append(p[1] + dtile(p[2]))
         elif act.startswith("ankan"):
-            toks.append("ankan" + act.split()[1])
+            toks.append("ankan" + dtile(act.split()[1]))
         elif act.startswith("added-kan"):
-            toks.append("kakan" + act.split()[1])
+            toks.append("kakan" + dtile(act.split()[1]))
     return "+".join(toks) if toks else "—"
 
 def _discard_label(rel):
-    t = rel["discard"]
+    t = dtile(rel["discard"])
     kind = rel.get("kind", "")
     if kind == "RIICHI":
         return t + " RIICHI!"
@@ -412,7 +426,7 @@ def _seat_rows(seat):
         elif rel["shanten"] > 0:
             state = f"{rel['shanten']}-shanten"
         else:
-            w = "/".join(rel["waits"])
+            w = "/".join(dtile(x) for x in rel["waits"])
             state = f"➜ TENPAI  {w}" if first else f"tenpai  {w}"
         rows.append((t, gain, _discard_label(rel), rel.get("hand", ""), state))
     return rows
@@ -424,20 +438,20 @@ def render_by_seat(names, built):
         L.append("")
         L.append("═" * 78)
         L.append(f" idx {rd['idx']} · {rd['label']} · dealer {rd['dealer']} · "
-                 f"dora {', '.join(rd['dora']) or '—'}")
+                 f"dora {', '.join(dtile(x) for x in rd['dora']) or '—'}")
         for p, seat in rd["seats"].items():
             ri = seat.get("riichi_info") or {}
             rlabel = ""
             if ri.get("established"):
-                rlabel = (f" · riichi {ri['tile']} @T{ri['turn']}" if ri.get("via") == "tedashi"
+                rlabel = (f" · riichi {dtile(ri['tile'])} @T{ri['turn']}" if ri.get("via") == "tedashi"
                           else f" · tsumogiri-riichi @T≥{ri['turn_min']}")
             elif ri.get("declared") and ri.get("via") == "tedashi":
-                rlabel = f" · riichi {ri['tile']} NULLIFIED"
+                rlabel = f" · riichi {dtile(ri['tile'])} NULLIFIED"
             dealer_tag = " · dealer" if names[p] == rd["dealer"] else ""
             L.append("")
             L.append(f"  {names[p]}{dealer_tag}{rlabel}")
             if seat["melds"]:
-                L.append(f"    melds: {', '.join(seat['melds'])}")
+                L.append(f"    melds: {', '.join(_meld_disp(m) for m in seat['melds'])}")
             L.append(f"    {'T':>3}  {'draw':<8} {'discard':<11} {'hand':<34} state")
             for (t, gain, disc, hand, state) in _seat_rows(seat):
                 L.append(f"    {t:>3}  {gain:<8} {disc:<11} {hand:<34} {state}".rstrip())
@@ -469,16 +483,15 @@ def _seat_actions(seat):
         for a in acq:
             act = a["action"]
             if "draw" in a:
-                toks.append(a["draw"])
+                toks.append(dtile(a["draw"]))
             elif act.startswith("call "):
-                p = act.split(); call_type = p[1]; call_tile = p[2]
-                toks.append(p[1] + p[2])
-                if call_type == "minkan":
-                    kans += 1
+                p = act.split(); call_type = p[1]; call_tile = p[2]  # call_tile is a fallback;
+                if call_type == "minkan":                            # the real called tile is
+                    kans += 1                                        # resolved in _interleave
             elif act.startswith("ankan"):
-                kans += 1; toks.append("ankan" + act.split()[1])
+                kans += 1; toks.append("ankan" + dtile(act.split()[1]))
             elif act.startswith("added-kan"):
-                kans += 1; toks.append("kakan" + act.split()[1])
+                kans += 1; toks.append("kakan" + dtile(act.split()[1]))
         d = dict(turn=t, gain="+".join(toks) if toks else "—",
                  call_type=call_type, call_tile=call_tile, kans=kans, _from=None)
         if not has_rel:
@@ -486,7 +499,7 @@ def _seat_actions(seat):
             acts.append(d); continue
         if "win" in rel:
             d.update(is_win=True, discard=None, kind="", hand=rel.get("hand", ""),
-                     state="win", gain=rel.get("win", d["gain"]))
+                     state="win", gain=dtile(rel["win"]) if rel.get("win") else d["gain"])
             acts.append(d); prev_tenpai = False; continue
         istenpai = bool(rel.get("tenpai"))
         first = istenpai and not prev_tenpai
@@ -496,7 +509,7 @@ def _seat_actions(seat):
         elif rel["shanten"] > 0:
             state = f"{rel['shanten']}-shanten"
         else:
-            w = "/".join(rel["waits"])
+            w = "/".join(dtile(x) for x in rel["waits"])
             state = f"➜ TENPAI  {w}" if first else f"tenpai  {w}"
         d.update(is_win=False, discard=rel["discard"], kind=rel.get("kind", ""),
                  hand=rel.get("hand", ""), state=state)
@@ -515,6 +528,7 @@ def _interleave(acts_by_seat, dealer, dora):
     kan_i = 1                 # dora[0] is the opening indicator; kans reveal 1,2,...
     step = 0
     rows = []
+    last_disc = last_discarder = None
     guard = 0
     while guard < 600:
         guard += 1
@@ -522,6 +536,11 @@ def _interleave(acts_by_seat, dealer, dora):
             break             # actor is out of actions -> round ended (ron / exhaustive)
         a = acts_by_seat[actor][ptr[actor]]; ptr[actor] += 1
         step += 1
+        # A chi is always the kamicha's tile, discarded immediately before — the raw meld
+        # order doesn't mark which tile was called, so resolve it from the previous discard.
+        if a["call_type"] == "chi" and last_disc is not None:
+            a["call_tile"] = last_disc
+            a["_from"] = last_discarder
         rows.append(("act", step, actor, a))
         for _ in range(a["kans"]):
             rows.append(("dora", dora[kan_i] if kan_i < len(dora) else None))
@@ -530,23 +549,35 @@ def _interleave(acts_by_seat, dealer, dora):
             break
         if a["discard"] is None:
             actor = (actor + 1) % 4; continue
+        last_disc, last_discarder = a["discard"], actor
+        # pon/kan can jump the queue from any seat; match the call to this discard.
+        # (chi is handled above via rotation, so it's excluded here.)
         caller = None
         for s in range(4):
             if s == actor or ptr[s] >= len(acts_by_seat[s]):
                 continue
             nxt = acts_by_seat[s][ptr[s]]
-            if nxt["call_type"] in ("chi", "pon", "minkan") and nxt["call_tile"] \
+            if nxt["call_type"] in ("pon", "minkan") and nxt["call_tile"] \
                and norm(nxt["call_tile"]) == norm(a["discard"]):
                 caller = s; break
         if caller is not None:
-            acts_by_seat[caller][ptr[caller]]["_from"] = actor
+            nc = acts_by_seat[caller][ptr[caller]]
+            nc["_from"] = actor
+            nc["call_tile"] = a["discard"]      # the actual called tile (correct red/notation)
             actor = caller
         else:
             actor = (actor + 1) % 4
     return rows
 
+def _meld_disp(m):
+    """Convert a raw meld label like 'chi:4s0s6s' to display form 'chi:4s0s6s' (honors -> letters)."""
+    if ":" in m:
+        kind, tiles = m.split(":", 1)
+        return f"{kind}:{_conv_tiles(tiles)}"
+    return m
+
 def _disc_disp(a):
-    t = a["discard"]; k = a.get("kind", "")
+    t = dtile(a["discard"]); k = a.get("kind", "")
     if k == "RIICHI":
         return t + " RIICHI!"
     if k == "tsumogiri":
@@ -559,7 +590,7 @@ def _result_lines(rd, names, dealer):
     if kind == "agari" and rd.get("agari"):
         for a in rd["agari"]:
             who = f"{_wl(a['who'], dealer)} {names[a['who']]}"
-            pts = a.get("points", "?"); machi = a.get("machi", "?")
+            pts = a.get("points", "?"); machi = dtile(a["machi"]) if a.get("machi") else "?"
             if a.get("tsumo"):
                 out.append(f"   ▶ {who} TSUMO {pts} (on {machi})")
             else:
@@ -579,7 +610,7 @@ def render(names, built):
     for rd in built:
         dealer = rd["dealer_seat"]
         L.append(""); L.append("═" * 78)
-        opening = rd["dora"][0] if rd["dora"] else "—"
+        opening = dtile(rd["dora"][0]) if rd["dora"] else "—"
         L.append(f" idx {rd['idx']} · {rd['label']} · opening dora {opening}")
         seats = rd["seats"]
         legend = []
@@ -594,10 +625,14 @@ def render(names, built):
         for row in _interleave(acts_by_seat, dealer, rd["dora"]):
             if row[0] == "dora":
                 tile = row[1]
-                L.append(f"        ✦ new dora indicator → {tile or '(revealed only at win)'}")
+                L.append(f"        ✦ new dora indicator → {dtile(tile) if tile else '(revealed only at win)'}")
                 continue
             _, step, seat, a = row
-            gain = a["gain"]
+            if a["call_type"] in ("chi", "pon", "minkan"):
+                ct = a.get("call_tile")
+                gain = f"{a['call_type']}{dtile(ct) if ct else ''}"
+            else:
+                gain = a["gain"]
             if a.get("_from") is not None:
                 gain += "◂" + _wl(a["_from"], dealer)
             if a["is_win"]:
