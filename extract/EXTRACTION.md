@@ -242,6 +242,12 @@ Standard 2-character format: `[0-9][mpsz]`
 - Game records are typically 30-60KB for a full East-only game.
 - Player names/account IDs are NOT in the round records -- they're in the outer `GameDetailRecords` wrapper which may be elsewhere in heap.
 - Seat 0 = East at game start. Dealer rotates per round via the `ju` field.
+- The head's `GameConfig` (field 5) carries the room: `config.mode` (f2).f1 = length
+  (1=East, 2=South) and `config.meta` (f3).f2 = `mode_id`. `mode_id` names the ranked
+  room+length: 4-player rooms step by 3 -- Bronze 2/3, Silver 5/6, Gold 8/9, Jade 11/12,
+  Throne 15/16 -- and 3-player rooms are 21-26 (Gold 21/22, Jade 23/24, Throne 25/26).
+  (Anchors cross-checked against amae-koromo's `GameMode` enum; Bronze/Silver follow the
+  same grid.) The extractor maps this to the `{room}` in the output filename.
 
 ---
 

@@ -13,6 +13,9 @@ list — no need to read the dial. Run with the replay open (any point is fine):
 
     MJS_ACCOUNT_ID=<your id> python3 majsoul_extract.py [--room Silver-Room-East] [--out DIR]
 
+The room (Bronze/Silver/Gold/Jade/Throne, East/South) is read from the game head's
+mode_id; pass --room only to override that.
+
 Set MJS_ACCOUNT_ID to your own Mahjong Soul account id (or edit the default
 below). Don't know it? Run once anyway — the script prints the head's account
 list (seat -> nickname -> id), so you can read your id off the output and set it.
@@ -275,6 +278,49 @@ def parse_accounts(block):
         if s not in seen: seen[s]=(a,n)
     return {s:seen[s] for s in seen}
 
+# mode_id -> room label. mode_id lives in the head's GameConfig.meta and encodes
+# both the ranked room and the length. 4-player rooms step by 3 (Bronze 2/3,
+# Silver 5/6, Gold 8/9, Jade 11/12, Throne 15/16); 3-player rooms are 21-26.
+# (Anchors — Gold 8/9, Jade 11/12, Throne 15/16, 3p 21-26 — cross-checked against
+#  amae-koromo's GameMode enum; Bronze/Silver follow the same +3 grid.)
+ROOM_MODES = {
+    2:  "Bronze-Room-East",   3:  "Bronze-Room-South",
+    5:  "Silver-Room-East",   6:  "Silver-Room-South",
+    8:  "Gold-Room-East",     9:  "Gold-Room-South",
+    11: "Jade-Room-East",     12: "Jade-Room-South",
+    15: "Throne-Room-East",   16: "Throne-Room-South",
+    21: "Gold-Room-East-3p",  22: "Gold-Room-South-3p",
+    23: "Jade-Room-East-3p",  24: "Jade-Room-South-3p",
+    25: "Throne-Room-East-3p",26: "Throne-Room-South-3p",
+}
+
+def parse_config(block, hstart):
+    """From the RecordGame head, read (mode_id, length) out of GameConfig (field 5):
+    config.mode (f2).f1 = round length (1=East, 2=South); config.meta (f3).f2 =
+    mode_id (the ranked room+length id). Either may be None (e.g. friendly rooms)."""
+    mode_id=length=None
+    for fn,ty,v in proto(block, hstart, min(len(block), hstart+2000)):
+        if fn==5 and ty=='b':
+            for cfn,cty,cv in proto(v):
+                if cfn==2 and cty=='b':          # GameMode
+                    for mfn,mty,mv in proto(cv):
+                        if mfn==1 and mty=='v': length=mv
+                elif cfn==3 and cty=='b':        # GameMetaData
+                    for gfn,gty,gv in proto(cv):
+                        if gfn==2 and gty=='v': mode_id=gv
+            break
+    return mode_id, length
+
+def room_label(mode_id, length):
+    """Map a parsed (mode_id, length) to a filename-safe room label. Unknown mode
+    ids keep the raw number (so the table is easy to extend) and still get the
+    East/South suffix from `length` when available."""
+    if mode_id in ROOM_MODES: return ROOM_MODES[mode_id]
+    ew = {1:"East", 2:"South"}.get(length)
+    if mode_id: return f"Room{mode_id}" + (f"-{ew}" if ew else "")
+    if ew:      return f"Room-{ew}"
+    return None
+
 def parse_head(block):
     m=re.search(rb'\d{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', block)
     if not m: return None
@@ -283,7 +329,9 @@ def parse_head(block):
     for fn,ty,v in proto(block, hstart, min(len(block), hstart+400)):
         if ty=='v' and 1_700_000_000 < v < 1_900_000_000:
             start_time=v; break
-    return {'uuid':uuid,'start_time':start_time,'accounts':parse_accounts(block)}
+    mode_id,length=parse_config(block, hstart)
+    return {'uuid':uuid,'start_time':start_time,'accounts':parse_accounts(block),
+            'mode_id':mode_id,'room':room_label(mode_id, length)}
 
 # ---- CDP -------------------------------------------------------------------
 def page_ws():
@@ -409,8 +457,7 @@ def recover_head(frag):
 
 async def main():
     global OUT_DIR
-    room = "Silver-Room-East"
-    if "--room" in sys.argv: room = sys.argv[sys.argv.index("--room")+1]
+    room_override = sys.argv[sys.argv.index("--room")+1] if "--room" in sys.argv else None
     if "--out" in sys.argv: OUT_DIR = Path(sys.argv[sys.argv.index("--out")+1]).expanduser()
     url = page_ws()
     async with websockets.connect(url, max_size=None, open_timeout=15) as ws:
@@ -514,6 +561,8 @@ async def main():
             print("WARN: your account_id wasn't in this game's head; defaulting to seat 0")
         self_seat=0
 
+    room = room_override or (head.get('room') if head else None) or "Unknown-Room"
+
     place = sorted(range(4), key=lambda s:(-finals[s], s)).index(self_seat)+1 if finals else 0
     suf = {1:'1st-place',2:'2nd-place',3:'3rd-place',4:'4th-place'}.get(place,'NA')
 
@@ -533,6 +582,7 @@ async def main():
     (OUT_DIR/fname).write_text(json.dumps(t,indent=2,ensure_ascii=False))
 
     print(f"\nyou = seat{self_seat} ({names[self_seat]}) = {finals[self_seat] if finals else '?'} pts = {suf}")
+    print(f"room : {room}" + (f"  (mode_id {head['mode_id']})" if head and head.get('mode_id') else ""))
     print(f"final: {finals}")
     if uuid: print(f"uuid : {uuid}")
     print(f"\nSaved -> {OUT_DIR/fname}  ({len(t['log'])} rounds)")
