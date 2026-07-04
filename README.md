@@ -9,7 +9,7 @@ efficiency, luck, and style — from the command line.
 | Dir | Contents |
 |-----|----------|
 | `extract/` | `majsoul_extract.py` — scrapes the currently-open replay from Chrome's WASM heap and saves it as tenhou6 JSON with a human-readable name. `EXTRACTION.md` documents the heap layout / protobuf format. |
-| `analyze/` | `mjsoul_decode.py` (round-by-round report + riichi detection), `mjsoul_turns.py` (turn-by-turn hand reconstruction with per-turn shanten/waits), `mjsoul_analyze.py` (efficiency / luck / style stats vs. the field), `mjsoul_luck.py` (realized luck: tenpai→win conversion, live wait width, outraced/deal-in outcomes). `mahjong_analysis_instructions.md` is a spec for the JSON format. |
+| `analyze/` | `mjsoul_decode.py` (round-by-round report + riichi detection), `mjsoul_turns.py` (turn-by-turn hand reconstruction with per-turn shanten/waits), `mjsoul_analyze.py` (efficiency / luck / style stats vs. the field), `mjsoul_luck.py` (realized luck: tenpai→win conversion, live wait width, outraced/deal-in outcomes), `mjsoul_value.py` (value-aware layer: yaku/dora/wait-liveness/game-state, re-labels efficiency flags so value- and placement-motivated plays aren't miscounted as errors). `mahjong_analysis_instructions.md` is a spec for the JSON format. |
 | `chrome-mcp/` | A small CDP-based browser automation MCP server used to drive Chrome during extraction. |
 | `examples/` | Sample extracted logs. |
 | `docs/` | Development notes. |
@@ -43,6 +43,7 @@ python3 analyze/mjsoul_decode.py  examples/*.json      # round-by-round report
 python3 analyze/mjsoul_turns.py   examples/*.json --round 2   # turn-by-turn one round
 python3 analyze/mjsoul_analyze.py examples/*.json      # efficiency / luck / style
 python3 analyze/mjsoul_luck.py    examples/*.json      # realized luck / conversion
+python3 analyze/mjsoul_value.py   examples/*.json --seat 3   # value-aware re-read of efficiency flags
 ```
 
 Sample `mjsoul_analyze.py` output:

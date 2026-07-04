@@ -170,3 +170,83 @@ who fed whom, red-five usage, etc.
   score, win/deal-in tallies) if asked.
 - If a log is unusually large or malformed, decode defensively (result from `round[-1]`,
   tolerate missing keys) and report what couldn't be parsed rather than guessing.
+---
+
+## 7. Value-aware analysis (`mjsoul_value.py`) — read this before trusting efficiency flags
+
+`mjsoul_analyze.py` optimizes **shanten → ukeire and nothing else.** That yardstick is
+deliberately value-blind, so on its own it *mis-reports value- and game-state-motivated
+plays as errors.* `mjsoul_value.py` is the correction layer; consult it before calling
+any discard a mistake.
+
+The four things pure efficiency cannot see:
+
+1. **Yaku presence & value.** A closed tenpai with no yaku *cannot win* without
+   riichi. Leaving such a hollow tenpai is not a shanten error — it's shedding a shape
+   that could only ever collect a noten payment. `hand_value()` scores each tenpai:
+   it returns whether the shape wins damaten and, if so, a **han total and point tier**
+   (yakuless → 1–4 han → mangan/haneman/baiman/yakuman) with **dora and aka broken out
+   explicitly** from the yaku han (`breakdown` reads e.g. `tanyao, pinfu (2) + dora 2 +
+   aka 1`), so you can tell "3 han from the hand" apart from "3 han that's mostly dora."
+   Covers the common yaku + a few yakuman (see §8). `tenpai_has_yaku()` remains as a thin
+   winnable/not gate.
+2. **Dora / aka retention.** A discard that keeps a dora or red five looks identical to
+   one that keeps a blank under ukeire. `dora_aka()` counts it; a discard that is
+   off-optimal on acceptance but keeps more dora than the (live-)optimal line is a
+   **value_trade**, not a leak.
+3. **Wait liveness — now wired into the efficiency scorer.** `mjsoul_analyze.ukeire()`
+   accepts a `gone` count (via `make_gone_at()`) and counts only **live** copies
+   (`4 − your hand − visible`), so `best_discard()` prefers a live wait over a dead one
+   and discounts dead acceptance pre-tenpai. Visibility is **causal**: computed as of
+   the moment you discarded (dora indicators + your own earlier discards & melds + other
+   seats' discards up to the going-around cut), not end-of-round. The efficiency headline
+   is therefore now **live-acceptance-optimal** (a stricter bar than raw ukeire — expect
+   lower percentages than the old metric; both YOU and FIELD move together, so the
+   comparison stays fair).
+4. **Game state.** No score context = no idea whether the objective is points or
+   placement. `standings()` gives rank + margin from the pre-round scores;
+   `objective_hint()` flags when a leader (especially into the final hand of a tonpuu
+   game) should switch to *protect-placement* — build reluctantly, fold readily.
+
+**`reclassify()` re-labels every off-optimal / shanten-losing discard as one of:**
+`real_error` (left a genuinely winnable tenpai), `hollow_exit` (left a **yakuless**
+tenpai — *not* a real loss), `shanten_regression` (dropped shanten but not from tenpai),
+`value_trade` (off-optimal on ukeire but kept more dora/aka), or `sub_optimal` (a real
+but usually minor acceptance loss).
+
+```
+python3 mjsoul_value.py replay.json --seat 3      # per-decision re-read for one seat
+python3 mjsoul_value.py replay.json --json        # machine-readable rows
+```
+
+### 7.1 How to phrase the analysis
+- **Never** report a raw "shanten-losing discard" count as if each were an error. Run
+  the reclassification first and separate `real_error` from `hollow_exit` /
+  `value_trade`. A `hollow_exit` off a dead yakuless wait is often *correct* play.
+- Treat early-game `sub_optimal` flags (3–4 shanten) as low-signal: at high shanten,
+  keeping a floater for its ryanmen/value upside routinely diverges from raw ukeire and
+  is a legitimate style choice, not a mistake. Report the *pattern*, not each instance.
+- Always state the pre-round rank/margin when judging aggression. "Should you have
+  built this hand?" has a different answer at +500 than at +12000.
+- A player who "lets the hand tell them what it wants" (following draw sequence rather
+  than forcing a target shape) will systematically score below 100% ukeire-optimal by
+  design. That is not evidence of weak play; do not frame it as such.
+
+## 8. Known limitations of the value layer (don't overclaim)
+- The value scorer is a **han-tier estimate, not an exact scorer.** It sums the common
+  yaku (tanyao, yakuhai, pinfu, iipeiko/ryanpeikou, sanshoku, ittsu, chanta/junchan,
+  toitoi, an approximate sanankou, honitsu/chinitsu, chiitoitsu) plus a few yakuman
+  (kokushi, daisangen, suuankou, tsuuiisou, daisuushii), then adds dora + aka. It does
+  **not** compute fu, so 1–4 han point values are representative (~30–40 fu) rather than
+  exact, and it ignores ippatsu, ura-dora, houtei/haitei, and open-hand kuisagari edge
+  cases. Mangan-and-up tiers are fu-independent and reliable; treat 1–4 han points as
+  ballpark. Damaten is assumed (no riichi han added); the returned `riichi_bonus` notes
+  a closed hand could add one.
+- **Wait-liveness / visibility uses a going-around approximation.** The causal cut is
+  the standard seat order from the dealer; it does not model call-driven turn skips, and
+  it counts revealed melds as visible throughout the hand rather than from their exact
+  moment. This is exact for a closed hand's own discards and close otherwise. It also
+  can't see opponents' concealed tiles, so live counts are an upper bound.
+- `objective_hint()` is coarse (rank + nearest-rival margin + final-hand flag). It does
+  not model sudden-death continuation, oya-riichi pressure, or the full placement-EV
+  table. Use it as a nudge, not a verdict.

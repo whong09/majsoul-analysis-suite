@@ -20,11 +20,17 @@ import sys, glob, json, statistics as st
 import mjsoul_turns as M
 
 # ---- acceptance (ukeire) + optimal-discard -------------------------------- #
-def ukeire(c, melds):
+def ukeire(c, melds, gone=None):
+    """Acceptance from a 13-tile shape. If `gone` (a 34-count of tiles already
+    visible: ponds, melds, dora indicators — NOT this hand) is given, count only
+    LIVE copies (4 - held - visible) so dead tiles don't inflate acceptance and,
+    at tenpai, the 'acceptance' is the live wait width. gone=None -> old raw
+    behavior (backward compatible)."""
     base = M.shanten(c[:], melds)
     tiles = kinds = 0
     for t in range(34):
-        av = 4 - c[t]
+        held = c[t] + (gone[t] if gone else 0)
+        av = 4 - held
         if av <= 0:
             continue
         c[t] += 1
@@ -33,8 +39,8 @@ def ukeire(c, melds):
         c[t] -= 1
     return base, tiles
 
-def best_discard(tiles, melds):
-    """Over all discards from a (3k+2)-tile hand: min shanten, then max ukeire."""
+def best_discard(tiles, melds, gone=None):
+    """Over all discards from a (3k+2)-tile hand: min shanten, then max (live) ukeire."""
     c = M.counts_of(tiles)
     best_sh, best_uk = 99, -1
     per = {}
@@ -43,12 +49,47 @@ def best_discard(tiles, melds):
         if c[t] == 0:
             continue
         c[t] -= 1
-        sh, uk = ukeire(c, melds)
+        sh, uk = ukeire(c, melds, gone)
         c[t] += 1
         per[M.i2t(t)] = (sh, uk)
         if (sh, -uk) < (best_sh, -best_uk):
             best_sh, best_uk = sh, uk
     return best_sh, best_uk, per
+
+def make_gone_at(drd, seat):
+    """Causal per-turn visibility for `seat`. Returns gone_at(k): the 34-count of
+    tiles visible to `seat` just before making its k-th discard (1-based) — dora
+    indicators, this seat's own earlier discards + called melds, and other seats'
+    discards up to the going-around cut, plus all revealed melds.
+
+    The cut is the standard seat order from the dealer: a seat upstream of us has
+    discarded k times before our k-th, a downstream seat k-1 times. This ignores
+    call-driven turn skips (a documented approximation — melds are counted as
+    visible throughout rather than from their exact moment), which is exact for a
+    closed hand's own discards and close otherwise. Kan tiles (a…/k…) remove 4."""
+    dealer = drd["kyoku"] % 4
+    pos = {p: (p - dealer) % 4 for p in range(4)}
+    dora = drd.get("dora", [])
+    seats = drd["seats"]
+
+    def add_tile(g, code, n=1):
+        g[M.t2i(M.strip_pref(code))] += n
+
+    def gone_at(k):
+        g = [0] * 34
+        for ind in dora:
+            add_tile(g, ind)
+        for p in range(4):
+            dl = seats[p]["discards"]
+            cut = (k - 1) if (p == seat or pos[p] > pos[seat]) else k
+            for d in dl[:cut]:
+                add_tile(g, d, 4 if d[:1] in ("a", "k") else 1)
+            for c in seats[p].get("calls", []):
+                parts = c.split(",")
+                for t in [parts[0][1:]] + parts[1:]:
+                    add_tile(g, t)
+        return g
+    return gone_at
 
 def dora_of(ind):
     ind = M.norm(ind); n = int(ind[0]); s = ind[1]
@@ -67,7 +108,7 @@ def parse_hand(hs):
     return out
 
 # ---- per-seat metrics from a decoded round -------------------------------- #
-def seat_metrics(bseat, dseat, dora_ind):
+def seat_metrics(bseat, dseat, dora_ind, gone_at=None):
     ev = bseat["events"]
     info = bseat.get("riichi_info") or {}
 
@@ -89,6 +130,7 @@ def seat_metrics(bseat, dseat, dora_ind):
     useful = draws = 0
     last_rest = hp_shanten
     tenpai_turn = None
+    own_disc = 0              # this seat's discards seen so far (for causal visibility)
     for i, e in enumerate(ev):
         sh = e.get("shanten")
         nm = len(e["melds"])
@@ -108,7 +150,9 @@ def seat_metrics(bseat, dseat, dora_ind):
         is_pre = well_formed
         nxt = ev[i+1] if i+1 < len(ev) else None
         if is_pre and nxt and "discard" in nxt and e["turn"] < cutoff:
-            bsh, buk, per = best_discard(tiles, len(e["melds"]))
+            # visibility just before this (the (own_disc+1)-th) discard
+            gone = gone_at(own_disc + 1) if gone_at else None
+            bsh, buk, per = best_discard(tiles, len(e["melds"]), gone)
             act = per.get(M.norm(nxt["discard"]))
             if act:
                 ash, auk = act
@@ -118,6 +162,8 @@ def seat_metrics(bseat, dseat, dora_ind):
                                       optimal=optimal, shanten_err=serr,
                                       uke_lost=(buk - auk if ash == bsh else None),
                                       best_sh=bsh, act_sh=ash))
+        if "discard" in e:
+            own_disc += 1
         if sh is not None:
             last_rest = sh
             if sh == 0 and tenpai_turn is None:
@@ -144,7 +190,8 @@ def analyze(paths):
         for brd, drd in zip(brounds, drounds):
             dora_ind = brd["dora"][0] if brd["dora"] else None
             for p in range(4):
-                m = seat_metrics(brd["seats"][p], drd["seats"][p], dora_ind)
+                gone_at = make_gone_at(drd, p)
+                m = seat_metrics(brd["seats"][p], drd["seats"][p], dora_ind, gone_at)
                 (per_seat["you"] if p == me else per_seat["field"]).append(m)
         # deal-in visibility (light pond-reading proxy) for the user
         for rd in drounds:
@@ -208,9 +255,9 @@ def main():
         ("reached tenpai",            fmt(y["tenpai_rate"], 1),        fmt(f["tenpai_rate"], 1)),
         ("avg turn reaching tenpai",  fmt(y["tenpai_turn"], d=1),      fmt(f["tenpai_turn"], d=1)),
         ("useful-draw rate (draws that advanced shanten)", fmt(y["useful_rate"], 1), fmt(f["useful_rate"], 1)),
-        ("--- EFFICIENCY (your decisions) ---", "", ""),
+        ("--- EFFICIENCY (your decisions, live-weighted) ---", "", ""),
         ("free discards evaluated",   str(y["eff_decisions"]),         str(f["eff_decisions"])),
-        ("acceptance-optimal discard", fmt(y["eff_optimal"], 1),       fmt(f["eff_optimal"], 1)),
+        ("live-acceptance-optimal discard", fmt(y["eff_optimal"], 1),  fmt(f["eff_optimal"], 1)),
         ("shanten-losing discards (clear errors)", str(y["shanten_errs"]), str(f["shanten_errs"])),
         ("  as rate of decisions",    fmt(y["shanten_err_rate"], 1),   fmt(f["shanten_err_rate"], 1)),
         ("avg ukeire lost on off-optimal", fmt(y["avg_uke_lost"], d=1), fmt(f["avg_uke_lost"], d=1)),
