@@ -24,6 +24,13 @@ Notes on the format this handles (see the accompanying instructions .md for full
 import json, sys, re
 
 WINDS = ["East", "South", "West", "North"]
+
+def round_label(kyoku, honba=0):
+    """Canonical round label. Base hands are just wind-number (East-1, East-2); the
+    honba component (honba+1) is appended only when the round carried a honba:
+    East-1 (base), East-1-2 (1 honba), East-1-3 (2 honba)…"""
+    base = f"{WINDS[kyoku // 4]}-{kyoku % 4 + 1}"
+    return base if not honba else f"{base}-{honba + 1}"
 HONOR = {"1z":"East","2z":"South","3z":"West","4z":"North",
          "5z":"White","6z":"Green","7z":"Red"}
 CALL = {"c":"chi","p":"pon","m":"minkan","a":"ankan","k":"added-kan"}
@@ -207,12 +214,14 @@ def report(doc):
     out = []
     disp = doc.get("rule", {}).get("disp", "?")
     aka  = doc.get("rule", {}).get("aka", 0)
+    title = doc.get("title", [])
+    room = title[1] if len(title) > 1 else None
     out.append(f"{' vs '.join(names)}")
+    if room: out.append(f"Room: {room}")
     out.append(f"Ruleset: {disp}  |  red-fives: {'on' if aka else 'off'}\n")
     for rd in rounds:
         oya = rd["kyoku"] % 4
-        wind = WINDS[rd["kyoku"]//4]; num = rd["kyoku"]%4 + 1
-        hdr = f"{wind} {num}" + (f" ({rd['honba']} honba)" if rd["honba"] else "")
+        hdr = round_label(rd["kyoku"], rd["honba"]) + (f" ({rd['honba']} honba)" if rd["honba"] else "")
         out.append(f"=== {hdr} ===  dealer: {names[oya]}"
                    + (f"  |  {rd['sticks']} riichi stick(s) carried" if rd["sticks"] else ""))
         out.append(f"  dora indicator: {', '.join(dtile(x) for x in rd['dora']) or '—'}")

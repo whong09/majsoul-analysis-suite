@@ -11,18 +11,14 @@ name built from the game head:
 Your seat is auto-detected by matching MY_ACCOUNT_ID against the head's account
 list — no need to read the dial. Run with the replay open (any point is fine):
 
-    MJS_ACCOUNT_ID=<your id> python3 majsoul_extract.py [--room Silver-Room-East] [--out DIR]
+    python3 majsoul_extract.py [--room Silver-Room-East]
 
 The room (Bronze/Silver/Gold/Jade/Throne, East/South) is read from the game head's
 mode_id; pass --room only to override that.
 
-Set MJS_ACCOUNT_ID to your own Mahjong Soul account id (or edit the default
-below). Don't know it? Run once anyway — the script prints the head's account
-list (seat -> nickname -> id), so you can read your id off the output and set it.
-
 Requires: pip3 install websockets --break-system-packages
 """
-import os, asyncio, json, struct, re, datetime, base64, sys, urllib.request
+import asyncio, json, struct, re, datetime, base64, sys, os, urllib.request
 from pathlib import Path
 
 try:
@@ -30,9 +26,13 @@ try:
 except ImportError:
     sys.exit("pip3 install websockets --break-system-packages")
 
-# ---- config (override via env) -----------------------------------------------
-# Your Mahjong Soul account id, used to auto-detect which seat is you. Find it in
-# the head account list the script prints, then set MJS_ACCOUNT_ID.
+# MAKA ("Seer") per-hand analysis: the fetchSeerReport protobuf persists in the WASM
+# heap after a replay loads, so we read it straight out of the heap (see scan_seer).
+from seer_decode import decode_bare_report, maka_summary
+
+# ---- your identity (from the game head account list) -------------------------
+# Set MJS_ACCOUNT_ID to your own Mahjong Soul account id so the extractor can tell which
+# seat is you (it's printed in the head account list on each run — find yours there once).
 MY_ACCOUNT_ID = int(os.environ.get("MJS_ACCOUNT_ID", "0"))
 CDP_PORT = int(os.environ.get("MJS_CDP_PORT", "9223"))
 OUT_DIR = Path(os.environ.get("MJS_OUT_DIR", str(Path.home() / "majsoul-logs"))).expanduser()
@@ -325,12 +325,18 @@ def parse_head(block):
     m=re.search(rb'\d{6}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', block)
     if not m: return None
     uuid=m.group().decode(); hstart=m.start()-2
-    start_time=None
+    # RecordGame head: uuid=field1, start_time=field2, end_time=field3. The client's
+    # Log list shows the END time, so we capture both and label files by end_time (so a
+    # file cross-references to its lobby row); start_time is kept for reference.
+    start_time=end_time=None
     for fn,ty,v in proto(block, hstart, min(len(block), hstart+400)):
         if ty=='v' and 1_700_000_000 < v < 1_900_000_000:
-            start_time=v; break
+            if fn==2 and start_time is None: start_time=v
+            elif fn==3 and end_time is None: end_time=v
+        if start_time is not None and end_time is not None: break
     mode_id,length=parse_config(block, hstart)
-    return {'uuid':uuid,'start_time':start_time,'accounts':parse_accounts(block),
+    return {'uuid':uuid,'start_time':start_time,'end_time':end_time,
+            'accounts':parse_accounts(block),
             'mode_id':mode_id,'room':room_label(mode_id, length)}
 
 # ---- CDP -------------------------------------------------------------------
@@ -377,6 +383,57 @@ async def evaluate(ws, expr, idn, await_promise=False):
 async def get_var(ws, name, idn):
     m=await evaluate(ws, f"window.{name}", idn)
     return m['result']['result']['value']
+
+# ---- MAKA / Seer report from the heap ----------------------------------------
+def _seer_scan_js(uuid):
+    """JS to find the game's Seer report in HEAPU8. The report is a length-delimited
+    field (0x12 <len> Report), and Report starts with its uuid (0x0a <len> uuid) then
+    the decisions (0x12 ...). We match that anchor for THIS uuid, then back up to the
+    enclosing 0x12 wrapper to read the exact report length so we slice it precisely."""
+    uu = ",".join(str(b) for b in uuid.encode())
+    return (r"""
+(() => {
+  const h=unityInstance.Module.HEAPU8, N=h.length;
+  const uu=[%s], L=uu.length;
+  for(let i=6;i<N-L-4;i++){
+    if(h[i]===0x0a && h[i+1]===L && h[i+2+L]===0x12){
+      let ok=true; for(let k=0;k<L;k++){ if(h[i+2+k]!==uu[k]){ ok=false; break; } }
+      if(!ok) continue;
+      let rl=-1;                                   // exact Report length from the wrapper
+      for(let back=2; back<=6; back++){
+        if(h[i-back]===0x12){
+          let p=i-back+1, len=0, sh=0, good=true;
+          while(p<=i){ const bb=h[p++]; len|=(bb&0x7f)<<sh; sh+=7; if(!(bb&0x80)) break; if(sh>35){good=false;break;} }
+          if(good && p===i && len>0){ rl=len; break; }
+        }
+      }
+      const end = rl>0 ? Math.min(N, i+rl) : Math.min(N, i+150000);
+      let s=''; for(let j=i;j<end;j++) s+=String.fromCharCode(h[j]);
+      return JSON.stringify({off:i, exact: rl>0, win:btoa(s)});
+    }
+  }
+  return JSON.stringify({off:-1});
+})()
+""" % uu)
+
+async def scan_seer(ws, uuid, idn, retries=3, delay=1.5):
+    """Read & decode this game's MAKA/Seer report from the heap. Returns a report dict
+    (uuid, decisions, rounds) or None if the game hasn't been MAKA-analyzed.
+
+    Retries briefly: right after a replay opens, the fetchSeerReport response for an
+    already-analyzed game may still be in flight, so a single read can miss it and
+    falsely report 'none'. We re-scan a few times before concluding it's un-analyzed."""
+    for attempt in range(retries):
+        try:
+            m = await evaluate(ws, _seer_scan_js(uuid), idn + attempt)
+            r = json.loads(m['result']['result']['value'])
+        except Exception:
+            r = None
+        if r and r.get('off', -1) >= 0:
+            return decode_bare_report(base64.b64decode(r['win']))
+        if attempt < retries - 1:
+            await asyncio.sleep(delay)
+    return None
 
 # ---- fragmented-heap fallback ------------------------------------------------
 # When the client keeps replay records as scattered individual allocations rather
@@ -456,9 +513,7 @@ def recover_head(frag):
     return None
 
 async def main():
-    global OUT_DIR
     room_override = sys.argv[sys.argv.index("--room")+1] if "--room" in sys.argv else None
-    if "--out" in sys.argv: OUT_DIR = Path(sys.argv[sys.argv.index("--out")+1]).expanduser()
     url = page_ws()
     async with websockets.connect(url, max_size=None, open_timeout=15) as ws:
         print("Scanning heap...")
@@ -486,10 +541,35 @@ async def main():
     if not groups: sys.exit("No decodable game in heap")
     def has_final(recs):
         return any(x['t'] in ('.lq.RecordHule','.lq.RecordNoTile') and DEC[x['t']](x['p'])['new'] for x in recs)
-    # winner: a FINISHED game beats an unfinished/noise fragment; then most copies, then freshest
-    best_sig=max(groups, key=lambda s:(any(has_final(r) for _,r in groups[s]),
-                                       len(groups[s]), max(c['start'] for c,_ in groups[s])))
+    def group_uuid(mem):
+        for c,_ in reversed(mem):
+            h=parse_head(base64.b64decode(c['head']))
+            if h and h.get('uuid'): return h['uuid']
+        return None
+    # --fresh (bulk-nav): the just-opened replay is the finished game we haven't saved
+    # yet, so exclude already-seen uuids (via --skip) and take the freshest remaining.
+    # This is robust to a previously-opened game still holding more heap copies.
+    fresh = "--fresh" in sys.argv
+    skip = set(sys.argv[sys.argv.index("--skip")+1].split(",")) if "--skip" in sys.argv else set()
+    if fresh:
+        cands=[s for s in groups if any(has_final(r) for _,r in groups[s])
+               and group_uuid(groups[s]) not in skip]
+        if not cands: sys.exit("no new finished game in heap (all seen, or none reached its end yet)")
+        best_sig=max(cands, key=lambda s: max(c['start'] for c,_ in groups[s]))
+    elif skip:
+        # bulk-nav: exclude already-seen games and pick only among FINISHED, not-yet-
+        # saved games, so we never fall through to the fragmented recovery on a game
+        # that is really just a stale copy. Clean exit if nothing new is loaded.
+        fin = [s for s in groups if group_uuid(groups[s]) not in skip
+               and any(has_final(r) for _,r in groups[s])]
+        if not fin: sys.exit("BULK: no new finished game in heap (all seen / none loaded)")
+        best_sig=max(fin, key=lambda s:(len(groups[s]), max(c['start'] for c,_ in groups[s])))
+    else:
+        # winner: a FINISHED game beats an unfinished/noise fragment; then most copies, then freshest
+        best_sig=max(groups, key=lambda s:(any(has_final(r) for _,r in groups[s]),
+                                           len(groups[s]), max(c['start'] for c,_ in groups[s])))
     members=sorted(groups[best_sig], key=lambda cr: cr[0]['start'])
+    # prefer the freshest copy that actually reached the game end
     chosen, recs = next(((c,r) for c,r in reversed(members) if has_final(r)), members[-1])
     # The head sits before only SOME copies; use whichever parses with our account.
     head=None
@@ -533,7 +613,7 @@ async def main():
             fsuf = {1:'1st',2:'2nd',3:'3rd',4:'4th'}.get(fplace,'?')
             print(f"  you = seat{fseat} ({fnames[fseat]}) = {ffinals[fseat]} pts = {fsuf} place")
         else:
-            print("  (couldn't detect your seat — set MJS_ACCOUNT_ID; placement unavailable)")
+            print("  (couldn't detect your seat — placement unavailable)")
         print(f"  final scores: {ffinals}")
         if len(cands) > 1: print(f"  (other terminal candidates seen: {cands[1:]})")
         if fhead and fhead.get('uuid'): print(f"  uuid: {fhead['uuid']}")
@@ -545,23 +625,36 @@ async def main():
     # seat + names
     names=["Player0","Player1","Player2","Player3"]; self_seat=None; uuid=None; start=None
     if head:
-        uuid=head['uuid']; start=head['start_time']
-        for seat,(aid,nick) in sorted(head['accounts'].items()):
+        uuid=head['uuid']
+        start=head.get('end_time') or head.get('start_time')   # label by END (lobby time)
+        for seat,(aid,nick) in head['accounts'].items():
             if 0<=seat<4: names[seat]=nick
             if aid==MY_ACCOUNT_ID: self_seat=seat
-        print("  head accounts (seat -> nickname -> account_id):")
-        for seat,(aid,nick) in sorted(head['accounts'].items()):
-            print(f"    seat{seat}: {nick}  ({aid}){'  <-- you' if aid==MY_ACCOUNT_ID else ''}")
     if self_seat is None:
+        if head and head.get('accounts'):
+            print("  head accounts (seat -> nickname -> account_id):")
+            for seat,(aid,nick) in sorted(head['accounts'].items()):
+                print(f"    seat{seat}: {nick}  ({aid}){'  <-- you' if aid==MY_ACCOUNT_ID else ''}")
         if MY_ACCOUNT_ID == 0:
             print("WARN: MJS_ACCOUNT_ID not set — can't tell which seat is you.\n"
-                  "      Find your account_id in the list above and set MJS_ACCOUNT_ID.\n"
-                  "      Defaulting to seat 0 for now.")
+                  "      Find your account_id in the list above and set MJS_ACCOUNT_ID.")
         else:
             print("WARN: your account_id wasn't in this game's head; defaulting to seat 0")
         self_seat=0
 
     room = room_override or (head.get('room') if head else None) or "Unknown-Room"
+
+    # MAKA/Seer per-hand analysis (if this game was analyzed): read it from the heap.
+    maka = None
+    if uuid and "--no-maka" not in sys.argv:
+        try:
+            async with websockets.connect(url, max_size=None, open_timeout=15) as sws:
+                rep = await scan_seer(sws, uuid, 30)
+            if rep and rep.get('rounds'):
+                maka = {"summary": maka_summary(rep), "rounds": rep["rounds"],
+                        "decisions": rep["decisions"]}
+        except Exception:
+            maka = None
 
     place = sorted(range(4), key=lambda s:(-finals[s], s)).index(self_seat)+1 if finals else 0
     suf = {1:'1st-place',2:'2nd-place',3:'3rd-place',4:'4th-place'}.get(place,'NA')
@@ -579,12 +672,31 @@ async def main():
     t=to_tenhou6(recs, names)
     t['title']=["Mahjong Soul", room.replace('-',' ')] + ([uuid] if uuid else [])
     if self_seat is not None: t['name'][self_seat]=names[self_seat]+" (you)"
+    if head and head.get('start_time'): t['start_time']=head['start_time']  # game begin
+    if head and head.get('end_time'):   t['end_time']=head['end_time']      # = lobby time
+    if maka: t['maka']=maka
     (OUT_DIR/fname).write_text(json.dumps(t,indent=2,ensure_ascii=False))
+    # rename-safe: drop any other file for the SAME game saved under a previous name
+    # scheme (e.g. labelled by start_time before we switched to end_time).
+    if uuid:
+        for old in OUT_DIR.glob("*.json"):
+            if old.name == fname: continue
+            try:
+                if uuid in json.loads(old.read_text()).get("title", []):
+                    old.unlink(); print(f"  (removed stale duplicate {old.name})")
+            except Exception: pass
 
     print(f"\nyou = seat{self_seat} ({names[self_seat]}) = {finals[self_seat] if finals else '?'} pts = {suf}")
     print(f"room : {room}" + (f"  (mode_id {head['mode_id']})" if head and head.get('mode_id') else ""))
     print(f"final: {finals}")
     if uuid: print(f"uuid : {uuid}")
+    if maka:
+        ms=maka['summary']
+        you=ms['seat_rating'].get(self_seat)
+        print(f"maka : {ms['rounds']} rounds, {ms['decisions']} decisions; seat_rating {ms['seat_rating']}"
+              + (f"  (you: {you})" if you is not None else ""))
+    else:
+        print("maka : none (game not MAKA-analyzed)")
     print(f"\nSaved -> {OUT_DIR/fname}  ({len(t['log'])} rounds)")
 
 if __name__=='__main__':

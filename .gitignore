@@ -16,3 +16,12 @@ chrome-mcp/dist/
 # Personal game logs — commit only curated examples/
 majsoul-logs/
 logs/
+
+# UI classifier references are screenshots of YOUR client (contain nicknames/hands);
+# generate your own with `python mjs_ui.py ref <name>` — never commit them.
+ui_refs/
+
+# Shareable packs contain game data — build locally, don't commit
+pack_out/
+pack_out.zip
+*.mortal.json

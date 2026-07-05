@@ -39,7 +39,7 @@ Usage:  python3 mjsoul_value.py file.json [file2 ...]        # per-decision re-r
 import sys, json
 import mjsoul_turns as M
 import mjsoul_analyze as A
-from mjsoul_decode import WINDS
+from mjsoul_decode import WINDS, round_label
 
 # --- 34-index helpers ------------------------------------------------------ #
 DRAGONS = {31, 32, 33}                 # White, Green, Red
@@ -390,7 +390,7 @@ def reclassify(paths, want_seat=None):
                         label = "value_trade"
                 rows.append(dict(
                     path=path.split("/")[-1], seat=seat,
-                    round=f"{WINDS[kyoku//4]}{kyoku%4+1}", turn=d["turn"],
+                    round=round_label(kyoku, drd["honba"]), turn=d["turn"],
                     discard=d["discard"], best_sh=d["best_sh"], act_sh=d["act_sh"],
                     uke_lost=d["uke_lost"], label=label, left_winnable_tenpai=left_yaku,
                     left_tier=left_tier, left_breakdown=left_breakdown,

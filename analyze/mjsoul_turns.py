@@ -36,7 +36,7 @@ computed from the concealed hand plus called melds; red fives (0m/0p/0s) are tre
 import json, sys, os, argparse, functools
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mjsoul_decode import load, decode, WINDS, dtile, dtiles, HONOR_DISP  # noqa: E402
+from mjsoul_decode import load, decode, WINDS, dtile, dtiles, HONOR_DISP, round_label  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # tile <-> 34-index helpers  (red fives 0m/0p/0s normalise to 5 for counting)
@@ -353,7 +353,7 @@ def build(doc, only_round=None, only_seat=None):
             seats_out[p] = walk_seat(s["haipai"], s["draws"], s["discards"], dealer == p)
             seats_out[p]["riichi_info"] = s.get("riichi_info")
         res = rd.get("result")
-        out.append(dict(idx=idx, label=f"{wind} {num}" + (f" ({rd['honba']} honba)" if rd["honba"] else ""),
+        out.append(dict(idx=idx, label=round_label(rd["kyoku"], rd["honba"]) + (f" ({rd['honba']} honba)" if rd["honba"] else ""),
                         dealer=names[dealer], dealer_seat=dealer, dora=rd["dora"], kind=rd["kind"],
                         agari=res.get("agari") if isinstance(res, dict) else None,
                         reason=rd.get("reason"),

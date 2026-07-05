@@ -8,8 +8,8 @@ efficiency, luck, and style — from the command line.
 
 | Dir | Contents |
 |-----|----------|
-| `extract/` | `majsoul_extract.py` — scrapes the currently-open replay from Chrome's WASM heap and saves it as tenhou6 JSON with a human-readable name. `EXTRACTION.md` documents the heap layout / protobuf format. |
-| `analyze/` | `mjsoul_decode.py` (round-by-round report + riichi detection), `mjsoul_turns.py` (turn-by-turn hand reconstruction with per-turn shanten/waits), `mjsoul_analyze.py` (efficiency / luck / style stats vs. the field), `mjsoul_luck.py` (realized luck: tenpai→win conversion, live wait width, outraced/deal-in outcomes), `mjsoul_value.py` (value-aware layer: yaku/dora/wait-liveness/game-state, re-labels efficiency flags so value- and placement-motivated plays aren't miscounted as errors). `mahjong_analysis_instructions.md` is a spec for the JSON format. |
+| `extract/` | `majsoul_extract.py` — scrapes the currently-open replay from Chrome's WASM heap and saves it as tenhou6 JSON (now also reads the in-client **MAKA** ("Seer") AI review from the heap and folds per-round/per-decision ratings into the JSON). `bulk_extract.py` drives the whole replay list to extract every game (canvas UI automation via `mjs_ui.py`; can auto-trigger MAKA analysis on un-analyzed games). `seer_decode.py`/`seer_capture.py` decode the MAKA protobuf. `EXTRACTION.md` documents the heap layout / protobuf format. |
+| `analyze/` | `mjsoul_decode.py` (round-by-round report + riichi detection), `mjsoul_turns.py` (turn-by-turn hand reconstruction with per-turn shanten/waits), `mjsoul_analyze.py` (efficiency / luck / style stats vs. the field), `mjsoul_luck.py` (realized luck: tenpai→win conversion, live wait width, outraced/deal-in outcomes), `mjsoul_value.py` (value-aware layer: yaku/dora/wait-liveness/game-state, re-labels efficiency flags so value- and placement-motivated plays aren't miscounted as errors), `mjsoul_mortal.py` (value-aware discard review with the local **Mortal** AI, policy-only — `mjsoul_to_mjai.py` converts to the mjai stream it consumes), `mjsoul_pack.py` (builds a self-contained "pack" of logs + precomputed Mortal sidecars to analyze elsewhere with no model). `mahjong_analysis_instructions.md` is a spec for the JSON format; `mjsoul_mortal.md` documents the Mortal reviewer + packs. |
 | `chrome-mcp/` | A small CDP-based browser automation MCP server used to drive Chrome during extraction. |
 | `examples/` | Sample extracted logs. |
 | `docs/` | Development notes. |
@@ -61,6 +61,37 @@ shanten-losing discards (clear errors)                  4         25
 riichi rate (per hand)                                12%        17%
 open/call rate (per hand)                             75%        50%
 ```
+
+## Bulk extraction & MAKA
+
+Extract every game in your replay list in one pass (drives the canvas UI over CDP, so
+it's viewport-agnostic), reading each game's MAKA ("Seer") AI review straight from the heap:
+
+```bash
+python3 extract/bulk_extract.py                 # extract all; free MAKA on already-analyzed games
+python3 extract/bulk_extract.py --analyze 30    # also spend up to 30 daily MAKA attempts on un-analyzed games
+```
+
+Bulk needs UI classifier references (`list`, `replay`, `makapanel`) — these are screenshots
+of **your** client, so they aren't shipped; generate your own once with
+`python3 extract/mjs_ui.py ref <name>` from each screen. The single-game extractor picks up
+MAKA automatically when a game has been analyzed (`maka` key in the JSON; `--no-maka` to skip).
+
+## Mortal review & shareable packs
+
+Run the local [Mortal](https://github.com/Equim-chan/Mortal) AI (policy-only) over your games
+for a value-aware discard review — its recommended action and the probability mass on what you
+actually did. Needs a local Mortal build + weights (see `analyze/mjsoul_mortal.md`):
+
+```bash
+python3 analyze/mjsoul_mortal.py logs/<game>.json          # you-vs-field table + biggest disagreements
+python3 analyze/mjsoul_pack.py --out pack_out --zip --glob 'logs/*.json'   # bundle for a no-model machine
+```
+
+`mjsoul_pack.py` precomputes Mortal's per-decision numbers into a `<log>.mortal.json` sidecar
+and assembles logs + sidecars + the pure-Python suite modules into a small pack. A no-model
+machine (e.g. a browser Claude) runs `mjsoul_mortal.py --no-model` and reads the sidecars —
+the model, weights, and Mortal repo never travel, and a safety sweep refuses to ship them.
 
 ## chrome-mcp
 

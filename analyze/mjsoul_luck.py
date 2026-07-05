@@ -88,7 +88,7 @@ def analyze(paths):
                     winners.add(a["who"])
                     if not a.get("tsumo"):
                         dealin_by[a["fromWho"]] = a["who"]
-            wind = M.WINDS[drd["kyoku"] // 4]; num = drd["kyoku"] % 4 + 1
+            rlabel = M.round_label(drd["kyoku"], drd["honba"])
             for p in range(4):
                 ev = brd["seats"][p]["events"]
                 ft = final_tenpai(ev)
@@ -110,7 +110,7 @@ def analyze(paths):
                     else:
                         agg[bucket]["draw"] += 1
                     if p == me and waits:
-                        unlucky.append((path.split("/")[-1].split("_")[1], f"{wind}{num}",
+                        unlucky.append((path.split("/")[-1].split("_")[1], rlabel,
                                         "/".join(M.dtile(w) for w in waits), lw,
                                         "dealt-in" if p in dealin_by else
                                         ("outraced" if winners else "draw")))
@@ -144,7 +144,7 @@ def main():
     if unlucky:
         print(f"\nYour tenpais that lost, by wait liveness (live tiles = winners still out there):")
         for game, rnd, waits, lw, how in sorted(unlucky, key=lambda x: -x[3]):
-            print(f"  {game:>6} {rnd:<7} wait {waits:<10} {lw} live  -> {how}")
+            print(f"  {game:>6} {rnd:<10} wait {waits:<10} {lw} live  -> {how}")
 
 if __name__ == "__main__":
     main()
