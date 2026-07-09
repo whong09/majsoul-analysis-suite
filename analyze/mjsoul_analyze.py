@@ -239,9 +239,20 @@ def fmt(x, pct=False, d=2):
     return f"{x*100:.0f}%" if pct else f"{x:.{d}f}"
 
 def main():
-    paths = [a for a in sys.argv[1:] if not a.startswith("--")]
+    # This report is inherently pooled you-vs-field (no per-seat mode). Accept and ignore
+    # a stray `--seat N` so callers reaching for it don't crash on the value being read as
+    # a path; use mjsoul_value.py for a single-seat per-decision read.
+    args, paths, skip = sys.argv[1:], [], False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False; continue
+        if a == "--seat":
+            skip = True; continue
+        if a.startswith("--"):
+            continue
+        paths.append(a)
     if not paths:
-        print("usage: mjsoul_analyze.py file.json [...]"); return
+        print("usage: mjsoul_analyze.py file.json [...]  (pooled you-vs-field; no --seat)"); return
     per_seat, dealins = analyze(paths)
     y, f = agg(per_seat["you"]), agg(per_seat["field"])
     if "--json" in sys.argv:

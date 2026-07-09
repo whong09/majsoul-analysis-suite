@@ -333,11 +333,15 @@ def write_sidecar(log_path, sidecar):
 
 
 def load_sidecar(log_path):
-    p = sidecar_path_for(log_path)
-    if not os.path.exists(p):
-        return None
-    with open(p, encoding='utf-8') as f:
-        return json.load(f)
+    # Canonical name is `<stem>.mortal.json`, but some upload paths (e.g. claude.ai's file
+    # sanitizer) rewrite the inner dot, so the sidecar can arrive as `<stem>_mortal.json`.
+    # Accept that variant on load; writing always uses the canonical name.
+    base = log_path[:-5] if log_path.endswith('.json') else log_path
+    for p in (base + '.mortal.json', base + '_mortal.json'):
+        if os.path.exists(p):
+            with open(p, encoding='utf-8') as f:
+                return json.load(f)
+    return None
 
 
 class SidecarError(Exception):
