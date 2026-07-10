@@ -12,28 +12,41 @@ Per row (top to bottom): click View -> wait_for('replay') -> run majsoul_extract
 wait_for('list') -> scroll down exactly one row. Dedup by uuid; stop when scrolling
 no longer yields new games.
 
-    python3 bulk_extract.py [--max N] [--from-scratch] [--analyze N]
+    python3 bulk_extract.py [--max N] [--from-scratch] [--analyze N] [--no-analyze] [--no-mortal]
+    python3 bulk_extract.py --current            # just the replay already open (single game)
 
 Start on the Log screen (Records -> Overview). Reload the page first for a clean heap
 (then selection is unambiguous). Run in the background; prints one line per game.
 
-MAKA: the single-game extractor reads the game's "Seer" (MAKA) report straight from the
-WASM heap — the fetchSeerReport protobuf lands there on every open — and folds per-round
-+ per-decision ratings into each JSON under a "maka" key. Free for already-analyzed games
-(no daily quota spent); bulk just surfaces the extractor's one-line MAKA summary.
+MAKA and Mortal are BOTH ON by default for every extracted game:
+  * MAKA: the single-game extractor reads the game's "Seer" (MAKA) report straight from
+    the WASM heap — the fetchSeerReport protobuf lands there on every open — and folds
+    per-round + per-decision ratings into each JSON under a "maka" key. Free for already-
+    analyzed games. For games that AREN'T analyzed yet, we spend daily MAKA quota to
+    analyze them (maka_analyze: opens the panel, clicks "Start Analysis" only once the
+    panel is CONFIRMED open so a misfire can't waste an attempt, then polls the heap until
+    the report lands). This is UNLIMITED by default until the quota runs out: 3 consecutive
+    analyze failures/timeouts are taken as "quota exhausted" and auto-analyze switches off
+    for the rest of the run. --analyze N caps the spend to N; --no-analyze reads MAKA only
+    and never spends quota.
+  * Mortal: after each new game is saved, its Mortal policy sidecar (<log>.mortal.json) is
+    written LOCALLY via the arm64 venv (torch+libriichi) — no quota, always runs. If the
+    venv (MORTAL_VENV, default ~/mortal-dryrun/venv/bin/python) is missing it degrades to a
+    skip instead of failing the extract. --no-mortal turns it off.
 
---analyze N: for games that aren't analyzed yet, spend up to N of your 30/day MAKA
-attempts to analyze them before extracting (maka_analyze: opens the MAKA panel, clicks
-"Start Analysis" only once the panel is CONFIRMED open so a misfire can't spend an
-attempt, then polls the heap until the report appears). Stops early if an analysis times
-out (a sign quota is exhausted). Default 0 = read-only, never spends quota.
+--current runs the whole pipeline (extract -> MAKA-analyze if needed -> Mortal sidecar) on
+the replay already open on screen, without walking the list — the single-game default.
 """
 import sys, os, json, asyncio, subprocess, re, glob
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import majsoul_extract as MX
 import mjs_ui
 
-EXTRACTOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "majsoul_extract.py")
+HERE = os.path.dirname(os.path.abspath(__file__))
+EXTRACTOR = os.path.join(HERE, "majsoul_extract.py")
+# Mortal sidecar runs LOCALLY (no quota) via the arm64 venv that has torch+libriichi.
+MORTAL_SCRIPT = os.path.join(HERE, "mjsoul_mortal.py")
+MORTAL_VENV = os.environ.get("MORTAL_VENV", os.path.expanduser("~/mortal-dryrun/venv/bin/python"))
 
 VIEW_FX      = 0.862     # x of the "View" buttons (their y is DETECTED per screen)
 EXIT_FX, EXIT_FY = 0.93, 0.067
@@ -56,6 +69,54 @@ def run_extractor(skip):
     return (u.group(1) if u else None,
             f.group(1).strip() if f else None,
             mk.group(1).strip() if mk else "maka: n/a")
+
+def run_mortal(log_path):
+    """Write the Mortal sidecar for a freshly-extracted log. Local + free (no quota), so
+    it runs on EVERY new game by default. Needs the arm64 venv (torch+libriichi); if that
+    interpreter is missing it degrades to a skip rather than failing the extract. Returns a
+    short status string for the per-game log line."""
+    if not log_path or not os.path.exists(MORTAL_VENV):
+        return "mortal: skipped (no venv)"
+    p = subprocess.run([MORTAL_VENV, MORTAL_SCRIPT, "--write-sidecar", log_path],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        tail = ((p.stderr or p.stdout).strip().splitlines() or [""])[-1]
+        return f"mortal: FAILED ({tail[:80]})"
+    ag = re.search(r'([\d.]+)%\s+agree', p.stdout)
+    return f"mortal: sidecar ({ag.group(1)}% agree)" if ag else "mortal: sidecar written"
+
+async def process_open_game(m, saved, analyze_budget, maka_fails, do_mortal):
+    """Full per-game pipeline for the replay currently on screen: extract -> (MAKA-analyze
+    if un-analyzed and quota remains) -> (Mortal sidecar). Shared by the bulk walker and the
+    single-game --current mode. Returns (uuid, path, maka, analyze_budget, maka_fails)."""
+    uuid, path, maka = run_extractor(saved)
+    # un-analyzed game + budget left: spend a MAKA attempt (quota-safe), then re-extract.
+    if uuid and analyze_budget > 0 and "none" in maka and uuid not in saved:
+        print(f"  analyzing {uuid} ({'∞' if analyze_budget >= 10**8 else analyze_budget} left)…", flush=True)
+        res = await maka_analyze(m, uuid)
+        if res == 'analyzed':
+            analyze_budget -= 1; maka_fails = 0
+            # The report is in the heap (maka_analyze confirmed it), but a fresh extractor
+            # subprocess can scan a beat before the full body has settled and miss it —
+            # which would waste the quota we just spent. Re-extract with a short bounded
+            # retry until MAKA actually lands (no extra quota; run_extractor is idempotent).
+            for _ in range(4):
+                uuid, path, maka = run_extractor(saved)      # re-extract with MAKA
+                if "none" not in maka:
+                    break
+                await asyncio.sleep(2)
+            maka += "  [auto-analyzed]" if "none" not in maka \
+                    else "  [auto-analyzed but MAKA didn't settle — quota spent, not captured]"
+        else:
+            maka_fails += 1
+            maka += f"  [{res}]"
+            if maka_fails >= 3:                               # persistent trouble / no quota
+                analyze_budget = 0
+                maka += " [3 consecutive fails — MAKA quota likely gone, auto-analyze off]"
+    # Mortal sidecar on every genuinely-new game (local, no quota).
+    if do_mortal and uuid and uuid not in saved:
+        maka += "  |  " + run_mortal(path)
+    return uuid, path, maka, analyze_budget, maka_fails
 
 def _list_thumb(img):
     W, H = img.size
@@ -163,50 +224,63 @@ async def open_top_button(m):
     await m.wait_for('list', timeout=6)
     return False
 
+def known_uuids():
+    """UUIDs already on disk, so we skip re-extracting them."""
+    saved = set()
+    for fp in glob.glob(os.path.join(str(MX.OUT_DIR), "*.json")):
+        try:
+            t = json.load(open(fp))
+            u = next((x for x in t.get("title", []) if re.match(r'\d{6}-[0-9a-f]{8}', str(x))), None)
+            if u: saved.add(u)
+        except Exception: pass
+    return saved
+
 async def main():
     argv = sys.argv[1:]
-    max_games = int(argv[argv.index("--max")+1]) if "--max" in argv else 200
-    saved = set()
-    if "--from-scratch" not in argv:
-        for fp in glob.glob(os.path.join(str(MX.OUT_DIR), "*.json")):
-            try:
-                t = json.load(open(fp))
-                u = next((x for x in t.get("title", []) if re.match(r'\d{6}-[0-9a-f]{8}', str(x))), None)
-                if u: saved.add(u)
-            except Exception: pass
-    print(f"bulk: {len(saved)} game(s) already on disk will be skipped; cap={max_games}", flush=True)
-
-    # --analyze N: spend up to N MAKA attempts this run to analyze un-analyzed games
-    # before extracting them (each costs 1 of the 30/day). Default 0 = read-only.
-    analyze_budget = int(argv[argv.index("--analyze")+1]) if "--analyze" in argv else 0
+    # MAKA and Mortal are ON by default for every extract. MAKA reads free for already-
+    # analyzed games; for un-analyzed ones it spends daily quota, UNLIMITED by default until
+    # the quota runs out (3 consecutive analyze failures => quota gone, auto-analyze off).
+    # --analyze N caps the spend; --no-analyze reads MAKA only (never spends). --no-mortal
+    # skips the local Mortal sidecar. Mortal has no quota, so it always runs when enabled.
+    if "--no-analyze" in argv:
+        analyze_budget = 0
+    elif "--analyze" in argv:
+        analyze_budget = int(argv[argv.index("--analyze")+1])
+    else:
+        analyze_budget = 10**9                       # "unlimited" — real cap is the daily quota
+    do_mortal = "--no-mortal" not in argv
     maka_fails = 0
+    saved = set() if "--from-scratch" in argv else known_uuids()
 
     m = await mjs_ui.MJS.connect()
+
+    # --current: just the replay already open on screen (single game). No list walking, and
+    # no on-disk dedup — the user pointed at THIS game, so process it even if already saved
+    # (re-extract, MAKA-analyze if un-analyzed, rewrite the Mortal sidecar idempotently).
+    if "--current" in argv:
+        if not await m.wait_for('replay', timeout=10):
+            print("bulk: --current needs a replay open on screen."); await m.close(); return
+        uuid, path, maka, *_ = await process_open_game(m, set(), analyze_budget, maka_fails, do_mortal)
+        if uuid:
+            print(f"[1] {uuid}  ->  {os.path.basename(path) if path else '(no file?)'}  |  {maka}", flush=True)
+        else:
+            print(f"bulk: no game found in the heap.  |  {maka}", flush=True)
+        await m.close(); return
+
+    max_games = int(argv[argv.index("--max")+1]) if "--max" in argv else 200
+    print(f"bulk: {len(saved)} game(s) already on disk will be skipped; cap={max_games}  "
+          f"(maka-analyze={'off' if not analyze_budget else ('∞' if analyze_budget >= 10**8 else analyze_budget)}, "
+          f"mortal={'on' if do_mortal else 'off'})", flush=True)
     if not await m.wait_for('list', timeout=10):
         print("bulk: not on the Log list — open Records -> Overview first."); await m.close(); return
-    print(f"bulk: flinging to top…  (auto-analyze budget: {analyze_budget})", flush=True)
+    print("bulk: flinging to top…", flush=True)
     await scroll_to_top(m)
 
     got = 0; dup_streak = 0; cycle = 0
     while got < max_games:
         if await open_top_button(m):
-            # the extractor reads MAKA from the heap (fetchSeerReport lands there on open)
-            # and writes it into the JSON itself — no separate capture needed here.
-            uuid, path, maka = run_extractor(saved)
-            # un-analyzed game + budget left: analyze it (quota-safe), then re-extract.
-            if uuid and analyze_budget > 0 and "none" in maka and uuid not in saved:
-                print(f"  analyzing {uuid} ({analyze_budget} attempt(s) left)…", flush=True)
-                res = await maka_analyze(m, uuid)
-                if res == 'analyzed':
-                    analyze_budget -= 1; maka_fails = 0
-                    uuid, path, maka = run_extractor(saved)   # re-extract with MAKA
-                    maka += "  [auto-analyzed]"
-                else:
-                    maka_fails += 1
-                    maka += f"  [{res}]"
-                    if maka_fails >= 3:                        # persistent trouble / no quota
-                        analyze_budget = 0
-                        maka += " [3 consecutive fails — auto-analyze disabled]"
+            uuid, path, maka, analyze_budget, maka_fails = await process_open_game(
+                m, saved, analyze_budget, maka_fails, do_mortal)
             await m.click(EXIT_FX, EXIT_FY)
             await m.wait_for('list', timeout=25)
             if uuid and uuid not in saved:
