@@ -175,14 +175,13 @@ async def maka_analyze(m, uuid, timeout=100):
     if not opened:
         return 'panel-failed'
     await m.wait_stable(timeout=5)                  # let the panel fully render
-    before = await _seer_uuids(m)                   # reports already in the heap
     await m.click(START_FX, START_FY)               # spend one attempt
     await m.wait_stable(timeout=8)
     t0 = asyncio.get_event_loop().time()
     result = 'timeout'
     while asyncio.get_event_loop().time() - t0 < timeout:
         now = await _seer_uuids(m)
-        if uuid in now or (now - before):           # our game, or ANY newly-analyzed one
+        if uuid in now:                             # THIS game's report has landed (not just any)
             result = 'analyzed'; break
         await asyncio.sleep(4)
     # dismiss the panel so the normal exit-door flow works
